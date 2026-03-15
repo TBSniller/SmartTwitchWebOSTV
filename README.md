@@ -10,6 +10,25 @@ webOS gaps and Android -> webOS differences:
 - [webOS Limitations](docs/WEBOS_LIMITATIONS.md)
 - [Android -> webOS Flow Mapping](docs/ANDROID_TO_WEBOS_FLOW_MAPPING.md)
 
+## How to install  
+
+### What do you need?  
+- webOS 3.4 or above  
+
+### Easy way
+Open Homebrew Channel and install SmartTwitchWebOSTV directly from there.  
+  
+### Manual way
+First you will have to [build](https://github.com/TBSniller/SmartTwitchWebOSTV#development) it from scratch, or download pre-compiled IPK from [releases](https://github.com/TBSniller/SmartTwitchWebOSTV/releases).  
+  
+```
+# Copy IPK to TV 
+scp /home/[USER]/downloads/com.tbsniller.smarttwitchwebostv_[version]_all.ipk root@[TVIP]:/tmp/com.tbsniller.smarttwitchwebostv_[version]_all.ipk
+
+# On TV install IPK
+luna-send -i -f luna://com.webos.appInstallService/dev/install '{"id":"com.tbsniller.smarttwitchwebostv","ipkUrl":"/tmp/com.tbsniller.smarttwitchwebostv_[version]_all.ipk","subscribe":true}'
+```
+
 ## Fork Overview
 
 - Keep upstream app sources under `app/` unchanged for webOS fixes.
@@ -42,6 +61,25 @@ webOS gaps and Android -> webOS differences:
 - Prepare hosted artifact (bridge injection validation): `npm run hosted:prepare`
 - Lint checks: `npm run lint`
 - Build webOS package: `npm run webos:package`
+
+## Development
+### Dependencies
+To build SmartTwitchWebOSTV you will need:  
+- [Node.js](https://nodejs.org/en/download/)
+
+### How to build  
+We have tried to make build process as easy as possible. After building all files can be found in `./build`.
+```
+# Clone project and submodules
+git clone https://github.com/TBSniller/SmartTwitchWebOSTV.git
+cd ./SmartTwitchWebOSTV
+
+# Install node dependencies
+npm install
+
+# Build
+npm run-script webos:package
+```  
 
 ## Upstream Historical Content
 
