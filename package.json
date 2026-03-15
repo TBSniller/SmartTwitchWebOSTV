@@ -1,5 +1,20 @@
 {
-  "dependencies": {
+  "scripts": {
+    "lint": "node release/scripts/maker.js jsh && node tools/webos/lintWebosBridge.js",
+    "release:prepare": "npm run hosted:prepare && npm run lint && npm run webos:package && npm run release:artifacts",
+    "release:artifacts": "node tools/release/generateHomebrewArtifacts.js",
+    "hosted:prepare": "node tools/upstream/prepareHostedRelease.js",
+    "sync:upstream:release": "node tools/upstream/syncUpstreamRelease.js",
+    "sync:upstream:android-context": "node tools/upstream/syncUpstreamAndroidContext.js",
+    "sync:upstream:all": "npm run sync:upstream:release && npm run sync:upstream:android-context",
+    "webos:package": "ares-package webos/app -o build/",
+    "webos:install": "node tools/webos/runAresCommand.js install",
+    "webos:launch": "node tools/webos/runAresCommand.js launch",
+    "webos:inspect": "node tools/webos/runAresCommand.js inspect",
+    "webos:remove": "node tools/webos/runAresCommand.js remove"
+  },
+  "devDependencies": {
+    "@webos-tools/cli": "^3.2.1",
     "crass": "^0.12.3",
     "firebase": "^12.8.0",
     "html-minifier": "^4.0.0",
@@ -9,3 +24,4 @@
     "uglify-js": "^3.19.3"
   }
 }
+

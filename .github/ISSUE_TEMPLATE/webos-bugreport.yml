@@ -1,0 +1,123 @@
+name: "webOS bug report"
+description: "Report a bug specific to SmartTwitchWebOSTV on LG webOS"
+title: "[webOS bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ **ATTENTION:** This repository tracks **LG webOS-specific** player/startup behavior for SmartTwitchTV. This project is NOT actively maintained.
+
+        If your report is about the core app (non-webOS), please open it in the upstream project:
+        https://github.com/fgl27/SmartTwitchTV/issues
+
+  - type: checkboxes
+    attributes:
+      label: Scope confirmation
+      description: |
+        Please confirm before submitting.
+      options:
+        - label: This issue is specific to LG webOS behavior in this fork (wrapper, bridge, packaging, lifecycle, remote input).
+          required: true
+        - label: I understand non-webOS bugs/features belong in https://github.com/fgl27/SmartTwitchTV/issues
+          required: true
+        - label: I searched existing issues to avoid duplicates.
+          required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: SmartTwitchWebOSTV version
+      description: "Tag, release version, or commit SHA (if built locally)."
+      placeholder: "vX.Y.Z or commit abc1234"
+    validations:
+      required: true
+
+  - type: input
+    id: webos_version
+    attributes:
+      label: webOS version
+      description: "TV firmware/webOS version."
+      placeholder: "webOS 6.0 / firmware 04.50.56"
+    validations:
+      required: true
+
+  - type: input
+    id: tv_model
+    attributes:
+      label: TV model
+      description: "LG model name."
+      placeholder: "OLED55C1PUA"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      options:
+        - webOS Homebrew Channel
+        - webOS Developer Mode (sideload)
+        - Local/dev package build
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: "Describe the problem clearly."
+      placeholder: "Playback starts but remote navigation stops responding after returning from background."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: "How can we reproduce this issue?"
+      value: |
+        1. Open the app
+        2. Navigate to ...
+        3. Press ...
+        4. Observe ...
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: "What should happen instead?"
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Screenshots
+      description: "Attach screenshots, videos, and logs (for example `ares-log` output) if available."
+      placeholder: "Drag and drop your screenshots here"
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional information
+      placeholder: "Any workaround or related details"
+      render: text
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve SmartTwitchWebOSTV.
+
+            

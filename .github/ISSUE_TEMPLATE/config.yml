@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "SmartTwitchTV (upstream) issues and feature requests"
+    url: https://github.com/fgl27/SmartTwitchTV/issues
+    about: This fork only tracks LG webOS wrapper/bridge topics. Report all non-webOS app bugs and feature requests in the upstream repository.
+  - name: "Community: OpenLGTV Discord"
+    url: https://discord.gg/9sqAgHVRhP
+    about: Helpful community for LG webOS topics.

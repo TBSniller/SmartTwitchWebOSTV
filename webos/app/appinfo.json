@@ -1,0 +1,21 @@
+{
+  "id": "com.tbsniller.smarttwitchwebostv",
+  "version": "1.0.0",
+  "vendor": "TBSniller",
+  "type": "web",
+  "main": "index.html",
+  "title": "SmartTwitchTV",
+  "appDescription": "SmartTwitchTV wrapper app for webOS with hosted compatibility bridge",
+  "icon": "assets/icon.png",
+  "largeIcon": "assets/icon.png",
+  "splashBackground": "assets/splash.png",
+  "iconColor": "#303030",
+  "checkUpdateOnLaunch": false,
+  "supportGIP": true,
+  "supportQuickStart": false,
+  "handlesRelaunch": true,
+  "disableBackHistoryAPI": true,
+  "vendorExtension": {
+    "allowCrossDomain": true
+  }
+}
