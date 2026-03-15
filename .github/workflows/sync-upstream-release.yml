@@ -1,0 +1,99 @@
+name: Sync Upstream Release
+
+on:
+  push:
+    branches:
+      - dev/webos-wrapper-cleanup
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Optional reason for manual run
+        required: false
+        type: string
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Sync upstream release mirror
+        run: npm run sync:upstream:release
+
+      - name: Detect tracked release changes
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- release tools/upstream/state/smarttwitchtv-head.sha tools/upstream/state/smarttwitchtv-release-tree.sha; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No tracked release changes detected."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Tracked release changes detected."
+          fi
+
+          UPSTREAM_SHA="unknown"
+          if [[ -f tools/upstream/state/smarttwitchtv-head.sha ]]; then
+            VALUE="$(tr -d '\n\r' < tools/upstream/state/smarttwitchtv-head.sha)"
+            if [[ -n "$VALUE" ]]; then
+              UPSTREAM_SHA="$VALUE"
+            fi
+          fi
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Stop when upstream is unchanged
+        if: steps.detect.outputs.changed != 'true'
+        run: echo "No-op sync run complete."
+
+      - name: Sanity checks
+        if: steps.detect.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -f release/githubio/js/webosCompatBridge.js
+
+          node -e "const fs=require('fs');const html=fs.readFileSync('release/index.html','utf8');const b=html.search(/<script\b(?=[^>]*\bsrc\s*=\s*['\"][^'\"]*githubio\/js\/webosCompatBridge\.js(?:\?[^'\"]*)?['\"])[^>]*>\s*<\/script>/i);if(b>=0){console.error('Tracked release/index.html must not include webosCompatBridge.js');process.exit(1);}"
+
+          if rg -n "startup_guard_|attemptStartupHardReload|maybeRunStartupBootstrapReload|tryStartupSoftRecovery|requestStartupRecoveryCheck" webos/bridge/webosCompatBridge.js; then
+            echo "Legacy watchdog/reload code markers still present." >&2
+            exit 1
+          fi
+
+      - name: Create sync pull request
+        if: steps.detect.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(sync): upstream release ${{ steps.detect.outputs.upstream_sha }}"
+          title: "chore(sync): update upstream release to ${{ steps.detect.outputs.upstream_sha }}"
+          body: |
+            Automated upstream sync from `fgl27/SmartTwitchTV`.
+
+            - Upstream SHA: `${{ steps.detect.outputs.upstream_sha }}`
+            - Synced via: `npm run sync:upstream:release`
+            - Scope: `release/` + upstream state tracking files only
+
+            Review checklist:
+            - Confirm `release/` changes are expected from upstream.
+            - Verify tracked `release/` stays mirror-clean (no `webosCompatBridge.js` tag/file patches).
+            - Confirm no watchdog/reload legacy code markers remain in `webos/bridge/webosCompatBridge.js`.
+          branch: chore/upstream-sync-${{ steps.detect.outputs.upstream_sha }}
+          delete-branch: true
+          labels: |
+            sync
+            upstream
