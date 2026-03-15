@@ -1,0 +1,4 @@
+interface:
+  display_name: "Upstream Downsync"
+  short_description: "Run upstream downsync analysis and planning workflow"
+  default_prompt: "Use this skill to run npm run sync:upstream:all, inspect upstream diffs, produce a <proposed_plan>, and require explicit user approval before any repo-tracked edits."

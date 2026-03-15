@@ -1,5 +1,53 @@
-**SmartTV Twitch AndroidTV APK**
+# SmartTV Twitch WebOS App
 
+Fork notice: This project exists because of @fgl27 incredible effort in his project [fgl27/SmartTwitchTV](https://github.com/fgl27/SmartTwitchTV). All credits belong to him (and the ones where he forked the project first). 
+
+I am not planning to activily maintain this fork right now, and you will still find Android references inside the app because I was too lazy to rename every Android-leaning detail during this webOS port.
+
+This release exists because it is more performant and feature-rich than the official Twitch TV app, and it may still be useful to others.
+
+webOS gaps and Android -> webOS differences:
+- [webOS Limitations](docs/WEBOS_LIMITATIONS.md)
+- [Android -> webOS Flow Mapping](docs/ANDROID_TO_WEBOS_FLOW_MAPPING.md)
+
+## Fork Overview
+
+- Keep upstream app sources under `app/` unchanged for webOS fixes.
+- Keep webOS adaptation in wrapper/bridge/tooling only:
+  - `webos/app/`
+  - `webos/bridge/webosCompatBridge.js`
+  - `tools/upstream/prepareHostedRelease.js`
+- Keep tracked `release/` as an upstream mirror from `HEAD:release`.
+- Keep Android upstream context local-only in `.ai_context/android_upstream/latest/` (ignored by git).
+
+## Canonical Documentation
+
+- Upstream sync procedure: [docs/UPSTREAM_SYNC_PLAYBOOK.md](docs/UPSTREAM_SYNC_PLAYBOOK.md)
+- Build/package/deploy and release operations: [docs/WEBOS_DEPLOYMENT.md](docs/WEBOS_DEPLOYMENT.md)
+- Current implementation status and parity: [docs/WEBOS_PORTING_STATUS.md](docs/WEBOS_PORTING_STATUS.md)
+- Platform gaps and non-1:1 transfers: [docs/WEBOS_LIMITATIONS.md](docs/WEBOS_LIMITATIONS.md)
+- Android flow mapping reference: [docs/ANDROID_TO_WEBOS_FLOW_MAPPING.md](docs/ANDROID_TO_WEBOS_FLOW_MAPPING.md)
+- Bridge performance audit reference: [docs/WEBOS_BRIDGE_PERFORMANCE_AUDIT.md](docs/WEBOS_BRIDGE_PERFORMANCE_AUDIT.md)
+- AI-oriented architecture/runtime summary: [docs/AI_DOCUMENTATION.md](docs/AI_DOCUMENTATION.md)
+
+## Repository Skills
+- Repository skill for upstream downsync workflow: [`.skills/upstream-downsync/SKILL.md`](.skills/upstream-downsync/SKILL.md)
+
+## Maintainer Quick Commands
+
+- Install dependencies: `npm install`
+- Sync upstream release mirror: `npm run sync:upstream:release`
+- Refresh local Android context snapshot: `npm run sync:upstream:android-context`
+- Run both sync flows: `npm run sync:upstream:all`
+- Prepare hosted artifact (bridge injection validation): `npm run hosted:prepare`
+- Lint checks: `npm run lint`
+- Build webOS package: `npm run webos:package`
+
+## Upstream Historical Content
+
+The section below is preserved as historical upstream context. It is intentionally kept in this root README. Some Android-specific paths and build details there are legacy for this fork.
+
+## Original Readme
 <!-- TOC -->
 
 - [About the project](#about-the-project)
