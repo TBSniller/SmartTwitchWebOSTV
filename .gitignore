@@ -36,12 +36,13 @@ release/locales/
 release/temp_maker/
 .package/
 index_release.html
-icon.png
 apk/app/src/main/assets/*
 release/scripts/testing.sh
 .firebase/*
 firebase-debug.log
-node_modules/*
-package-lock.json
+node_modules/
 todo.txt
-apk/.idea/deviceManager.xml
+.ai_context/
+.tmp/
+build/
+.claude/settings.local.json
