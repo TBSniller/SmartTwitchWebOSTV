@@ -12,9 +12,6 @@ webOS gaps and Android -> webOS differences:
 
 ## How to install  
 
-### What do you need?  
-- webOS 3.4 or above  
-
 ### Easy way
 Open Homebrew Channel and install SmartTwitchWebOSTV directly from there.  
   
