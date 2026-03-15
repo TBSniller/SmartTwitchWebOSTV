@@ -1,9 +1,6 @@
 name: Sync Upstream Release
 
 on:
-  push:
-    branches:
-      - dev/webos-wrapper-cleanup
   workflow_dispatch:
     inputs:
       reason:
