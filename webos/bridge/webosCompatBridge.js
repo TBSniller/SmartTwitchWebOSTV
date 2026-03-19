@@ -163,6 +163,12 @@
     var previewStallTimerId = 0;      // 7-second stall check timer for preview player.
     var reuseFeedSwitchTimerId = 0;   // Timer for ReuseFeedPlayer delayed switch.
     var sceneSafetyStopTimerId = 0;   // Deduped timer for delayed scene-leave cleanup.
+    var mainLastProgressWallMs = 0;   // Last wall-clock timestamp with meaningful playback progress.
+    var mainLastCurrentTime = 0;      // Last sampled main currentTime (seconds).
+    var mainLastBufferedAhead = 0;    // Last sampled buffered-ahead seconds for main.
+    var mainHardReloadCount = 0;      // Number of hard reloads (mv.load) in current cooldown window.
+    var mainLastHardReloadMs = 0;     // Wall-clock timestamp of most recent hard reload.
+    var mainDecoderJamRecoveryTimerId = 0; // Timer id for decoder-jam soft recovery follow-up.
 
     // --- Loading indicator state ---
     var mainLoadingSinceAt = 0;       // When main loader was first shown (for hysteresis).
@@ -234,6 +240,11 @@
     var NETWORK_CIRCUIT_HOST_MAX = 48;                 // Max tracked circuit-breaker hosts.
     var PREVIEW_SET_COOLDOWN_MS = 450;                 // Dedup cooldown for repeated setPrev calls.
     var LIFECYCLE_STOP_MIN_HIDDEN_MS = 12000;          // Min hidden time before stopping playback.
+    var STALL_PROGRESS_THRESHOLD_MS = 4000;            // No-progress window before stall is considered persistent.
+    var STALL_BUFFER_LOW_SECONDS = 1.0;                // Buffer-ahead threshold that indicates network starvation.
+    var HARD_RELOAD_COOLDOWN_WINDOW_MS = 30000;        // Time window for mv.load() cooldown accounting.
+    var HARD_RELOAD_MAX_IN_WINDOW = 2;                 // Max mv.load() attempts per cooldown window.
+    var DECODER_JAM_SOFT_RECOVERY_MS = 1200;           // Follow-up delay for pause/play soft recovery checks.
 
     // --- Network layer state ---
     var networkInFlightByKey = {};            // In-flight XHR requests by dedup key.
@@ -1187,6 +1198,7 @@
             call('Play_UpdateDuration', [getMainDurationMs()]);
             mainErrorCount = 0;
             clearMainStallTimer();
+            markMainProgressBaseline();
             tryPlay(mv);
             applyAudio();
         });
@@ -1194,17 +1206,20 @@
         mv.addEventListener('canplay', function () {
             mainErrorCount = 0;
             clearMainStallTimer();
+            markMainProgressBaseline();
             setMainLoading(false);
         });
         // playing: playback started or resumed. Hide loader immediately.
         mv.addEventListener('playing', function () {
             mainErrorCount = 0;
             clearMainStallTimer();
+            markMainProgressBaseline();
             setMainLoading(false);
         });
         // pause: user paused or stream ended. Hide loader if not ended.
         mv.addEventListener('pause', function () {
             clearMainStallTimer();
+            clearMainDecoderJamRecoveryTimer();
             if (!mv || mv.ended) return;
             setMainLoading(false);
         });
@@ -1212,15 +1227,26 @@
         mv.addEventListener('loadeddata', function () {
             mainErrorCount = 0;
             clearMainStallTimer();
+            markMainProgressBaseline();
             setMainLoading(false);
         });
         // timeupdate: fires ~4Hz during playback. Opportunistically hides loader.
         mv.addEventListener('timeupdate', function () {
             mainErrorCount = 0;
+            var current = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
+            if (current > mainLastCurrentTime + 0.01) {
+                mainLastCurrentTime = current;
+                mainLastProgressWallMs = Date.now();
+            }
             maybeAutoClearMainLoading('timeupdate', 300);
         });
         // progress: new data downloaded. Opportunistically hides loader.
         mv.addEventListener('progress', function () {
+            var bufferedAhead = getBufferedAheadSeconds(mv);
+            if (bufferedAhead > mainLastBufferedAhead + 0.05) {
+                mainLastProgressWallMs = Date.now();
+            }
+            mainLastBufferedAhead = bufferedAhead;
             maybeAutoClearMainLoading('progress', 600);
         });
         // seeking: user seeked. Request debounced loader show + schedule stall check.
@@ -1248,7 +1274,7 @@
             }
             if (mv.readyState >= 3) {
                 clearMainLoadingShowTimer();
-                clearMainStallTimer();
+                scheduleMainStallCheck();
                 return;
             }
             requestMainLoadingShow();
@@ -1257,11 +1283,13 @@
         // ended: playback finished. Notify upstream app.
         mv.addEventListener('ended', function () {
             clearMainStallTimer();
+            clearMainDecoderJamRecoveryTimer();
             call('Play_PannelEndStart', [ms.type, 0, 0]);
         });
         // error: playback error. Retry up to 2x, then escalate to upstream failure handler.
         mv.addEventListener('error', function () {
             clearMainStallTimer();
+            clearMainDecoderJamRecoveryTimer();
             setMainLoading(false);
             if (mv && mv.error && mv.error.code === 1) return;
             if (retryMainPlayback()) return;
@@ -1354,6 +1382,7 @@
         if (v === mv) {
             clearMainStallTimer();
             mainErrorCount = 0;
+            resetMainRecoveryState();
             setMainLoading(false);
             lastMainRect.left = -1;
             lastMainRect.top = -1;
@@ -1788,6 +1817,93 @@
         w.clearTimeout(previewStallTimerId);
         previewStallTimerId = 0;
     }
+    function clearMainDecoderJamRecoveryTimer() {
+        if (!mainDecoderJamRecoveryTimerId) return;
+        w.clearTimeout(mainDecoderJamRecoveryTimerId);
+        mainDecoderJamRecoveryTimerId = 0;
+    }
+    function resetMainRecoveryState() {
+        clearMainDecoderJamRecoveryTimer();
+        mainLastProgressWallMs = Date.now();
+        mainLastCurrentTime = 0;
+        mainLastBufferedAhead = 0;
+        mainHardReloadCount = 0;
+        mainLastHardReloadMs = 0;
+    }
+    function markMainProgressBaseline() {
+        var now = Date.now();
+        mainLastProgressWallMs = now;
+        if (!mv) {
+            mainLastCurrentTime = 0;
+            mainLastBufferedAhead = 0;
+            return;
+        }
+        var current = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
+        mainLastCurrentTime = current;
+        mainLastBufferedAhead = getBufferedAheadSeconds(mv);
+    }
+    function classifyMainStall() {
+        if (!mv || !hasVideoSource(mv) || !isMainActive() || isVideoPausedByUser(mv) || mv.ended) return 'not_applicable';
+        var now = Date.now();
+        var sinceProgress = mainLastProgressWallMs > 0 ? now - mainLastProgressWallMs : Number.MAX_VALUE;
+        if (sinceProgress < STALL_PROGRESS_THRESHOLD_MS) return 'transient';
+        var bufferAhead = getBufferedAheadSeconds(mv);
+        var readyState = mv.readyState || 0;
+        if (bufferAhead < STALL_BUFFER_LOW_SECONDS && readyState < 3) return 'network_buffering';
+        return 'decoder_jam';
+    }
+    function debugStallDecision(classification, context) {
+        if (!w.Main_isDebug || !w.console || typeof w.console.warn !== 'function') return;
+        var readyState = mv ? mv.readyState || 0 : 0;
+        var networkState = mv ? mv.networkState || 0 : 0;
+        var bufferAhead = mv ? getBufferedAheadSeconds(mv) : 0;
+        var now = Date.now();
+        var sinceProgress = mainLastProgressWallMs > 0 ? now - mainLastProgressWallMs : -1;
+        var current = mv && !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
+        w.console.warn('[sttv-webos] stall=' + classification +
+            ' ctx=' + (context || '') +
+            ' rs=' + readyState +
+            ' ns=' + networkState +
+            ' buf=' + bufferAhead.toFixed(2) +
+            ' since=' + sinceProgress +
+            ' ct=' + current.toFixed(2) +
+            ' hardReloads=' + mainHardReloadCount +
+            ' errCount=' + mainErrorCount);
+    }
+    function attemptDecoderJamRecovery() {
+        if (!isMainActive() || !mv) return false;
+        if (isVideoPausedByUser(mv) || mv.ended) return false;
+        clearMainDecoderJamRecoveryTimer();
+        requestMainLoadingShow();
+        var startTime = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
+        debugStallDecision('decoder_jam', 'soft_recovery_start');
+        try { mv.pause(); } catch (e) {}
+        w.setTimeout(function () {
+            if (!isMainActive() || !mv) return;
+            if (isVideoPausedByUser(mv) || mv.ended) return;
+            tryPlay(mv);
+            applyAudio();
+        }, 100);
+        mainDecoderJamRecoveryTimerId = w.setTimeout(function () {
+            mainDecoderJamRecoveryTimerId = 0;
+            if (!isMainActive() || !mv) return;
+            if (isVideoPausedByUser(mv) || mv.ended) {
+                setMainLoading(false);
+                return;
+            }
+            var current = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
+            if (current > startTime + 0.1) {
+                markMainProgressBaseline();
+                setMainLoading(false);
+                clearMainLoadingShowTimer();
+                debugStallDecision('decoder_jam_recovered', 'soft_recovery_check');
+                return;
+            }
+            debugStallDecision('decoder_jam_failed', 'soft_recovery_check');
+            handleMainPlaybackFailure(1, 0);
+        }, DECODER_JAM_SOFT_RECOVERY_MS);
+        return true;
+    }
     // =========================================================================
     // Error Recovery (Stall Detection + Retry with Backoff)
     // =========================================================================
@@ -1798,12 +1914,27 @@
     function retryMainPlayback() {
         if (!isMainActive() || !mv) return false;
         if (isVideoPausedByUser(mv)) return false;
+        var now = Date.now();
+        if (mainLastHardReloadMs > 0 && now - mainLastHardReloadMs > HARD_RELOAD_COOLDOWN_WINDOW_MS) {
+            mainHardReloadCount = 0;
+        }
+        if (mainHardReloadCount >= HARD_RELOAD_MAX_IN_WINDOW) {
+            debugStallDecision('network_buffering', 'retry_cooldown_block');
+            return false;
+        }
         if (mainErrorCount >= 2) return false;
+        clearMainDecoderJamRecoveryTimer();
         mainErrorCount += 1;
         requestMainLoadingShow();
         if (ms.type === 2 || ms.type === 3) ms.resume = mtime();
         w.setTimeout(function () {
             if (!isMainActive() || !mv) return;
+            var loadNow = Date.now();
+            if (mainLastHardReloadMs > 0 && loadNow - mainLastHardReloadMs > HARD_RELOAD_COOLDOWN_WINDOW_MS) {
+                mainHardReloadCount = 0;
+            }
+            mainHardReloadCount += 1;
+            mainLastHardReloadMs = loadNow;
             try {
                 mv.load();
             } catch (e) {}
@@ -1849,6 +1980,7 @@
         var ec = parseInt(errorCode, 10) || 0;
         setMainLoading(false);
         clearMainStallTimer();
+        resetMainRecoveryState();
         // For live playback, prefer the live-clean path to avoid aggressive forced
         // end/start loops that can bounce back to the home screen on transient failures.
         if ((ms.type || 1) === 1 && typeof w.Play_CheckIfIsLiveClean === 'function') {
@@ -1863,18 +1995,27 @@
         clearMainStallTimer();
         mainStallTimerId = w.setTimeout(function () {
             mainStallTimerId = 0;
-            if (!isMainActive()) {
-                setMainLoading(false);
-                stopMainIfLeavingPlayerScene(0);
-                return;
-            }
-            if (isVideoPausedByUser(mv)) {
-                setMainLoading(false);
-                return;
-            }
-            if (mv && mv.readyState >= 3 && !mv.paused && !mv.ended) {
+            var classification = classifyMainStall();
+            debugStallDecision(classification, 'stall_timer');
+            if (classification === 'not_applicable') {
                 setMainLoading(false);
                 clearMainLoadingShowTimer();
+                if (!isMainActive()) stopMainIfLeavingPlayerScene(0);
+                return;
+            }
+            if (classification === 'transient') {
+                var hadLoader = isMainLoadingVisible();
+                setMainLoading(false);
+                clearMainLoadingShowTimer();
+                if (hadLoader && isMainActive() && mv && !isVideoPausedByUser(mv) && !mv.ended) {
+                    scheduleMainStallCheck();
+                }
+                return;
+            }
+            if (classification === 'decoder_jam') {
+                if (maybeAutoClearMainLoading('stall_timer', 1000)) return;
+                if (attemptDecoderJamRecovery()) return;
+                handleMainPlaybackFailure(1, 0);
                 return;
             }
             if (maybeAutoClearMainLoading('stall_timer', 1000)) return;
@@ -2040,6 +2181,7 @@
         resetVideoStatusCounters();
         clearMainStallTimer();
         mainErrorCount = 0;
+        resetMainRecoveryState();
         requestMainLoadingShow();
         ms.type = t || 1;
         ms.rawUri = u || '';
