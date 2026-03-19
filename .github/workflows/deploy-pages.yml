@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - master
-      - dev/pages-publish
+      - dev/publish-pages
   workflow_dispatch:
     inputs:
       reason:
@@ -40,12 +40,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin master dev/pages-publish
+          git fetch --no-tags --depth=1 origin master
+
+          DEV_REF="origin/master"
+          if git ls-remote --exit-code --heads origin dev/publish-pages >/dev/null 2>&1; then
+            git fetch --no-tags --depth=1 origin dev/publish-pages
+            DEV_REF="origin/dev/publish-pages"
+          else
+            echo "::warning::origin/dev/publish-pages not found. Publishing /dev from origin/master."
+          fi
 
           rm -rf .worktrees
           mkdir -p .worktrees
           git worktree add --detach .worktrees/master origin/master
-          git worktree add --detach .worktrees/dev origin/dev/pages-publish
+          git worktree add --detach .worktrees/dev "$DEV_REF"
 
           PAGES_DIR="${GITHUB_WORKSPACE}/.pages"
           rm -rf "$PAGES_DIR"

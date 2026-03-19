@@ -12,7 +12,7 @@ This document provides AI-oriented architecture context and a documentation map 
 - Tracked `release/` remains an upstream mirror; bridge injection is artifact-time, not tracked in `release/`.
 - Hosted channels:
   - Stable: `/release/index.html` (from `master`)
-  - Dev: `/dev/index.html` (from `dev/pages-publish`)
+  - Dev: `/dev/index.html` (from `dev/publish-pages`)
 
 ## Runtime Behavior Notes
 - `window.Android` API compatibility is required for `app/specific/OSInterface.js`.
