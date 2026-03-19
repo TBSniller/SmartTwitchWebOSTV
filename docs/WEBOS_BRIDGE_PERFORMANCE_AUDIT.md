@@ -27,6 +27,14 @@ Audit date: 2026-03-01
 | P1 | Timer accumulation in scene safety cleanup | Repeated `stopMainIfLeavingPlayerScene()` calls queued multiple delayed timers | Added single deduped timer id (`sceneSafetyStopTimerId`) with clear/reset behavior | Less timer churn, lower delayed callback pressure |
 | P2 | Visibility/state drift after recovery | Remaining style-read and cache state could diverge after relaunch/recovery | Preview visibility checks switched to in-memory state; recovery now resyncs visibility flags and invalidates fallback cache | More deterministic active-state behavior after relaunch |
 
+## Playback Recovery Hardening (2026-03-19)
+
+- Main stall handling is now classification-driven (`transient`, `network_buffering`, `decoder_jam`) instead of treating all stalls as reload-worthy.
+- Network starvation keeps existing retry behavior, but hard reloads (`mv.load()`) are now cooldown-limited to 2 attempts per 30s window.
+- Decoder/surface jam path now uses a soft recovery (`pause()` + `play()`) with follow-up verification before escalation, avoiding immediate pipeline teardown/rebuild.
+- Main progress tracking is updated from `loadedmetadata/canplay/playing/loadeddata/timeupdate/progress`, so stall decisions are based on observed forward progress rather than `readyState` alone.
+- `stalled` event handling keeps the no-flicker fast path (no forced loader show for `readyState >= 3`) while still scheduling hidden stall rechecks to catch persistent decoder jams.
+
 ## Before/After Details
 
 ### Loader visibility behavior
