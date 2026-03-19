@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - dev/pages-publish
   workflow_dispatch:
     inputs:
       reason:
@@ -35,11 +36,27 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Prepare Pages artifact
+      - name: Prepare combined Pages artifact (/release + /dev)
         shell: bash
         run: |
           set -euo pipefail
-          node tools/upstream/prepareHostedRelease.js --out-dir .pages
+          git fetch --no-tags --depth=1 origin master dev/pages-publish
+
+          rm -rf .worktrees
+          mkdir -p .worktrees
+          git worktree add --detach .worktrees/master origin/master
+          git worktree add --detach .worktrees/dev origin/dev/pages-publish
+
+          PAGES_DIR="${GITHUB_WORKSPACE}/.pages"
+          rm -rf "$PAGES_DIR"
+          mkdir -p "$PAGES_DIR"
+
+          node .worktrees/master/tools/upstream/prepareHostedRelease.js --out-dir "$PAGES_DIR" --channel release
+          node .worktrees/dev/tools/upstream/prepareHostedRelease.js --out-dir "$PAGES_DIR" --channel dev
+
+          git worktree remove .worktrees/master --force
+          git worktree remove .worktrees/dev --force
+          rm -rf .worktrees
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

@@ -42,7 +42,7 @@ Reason:
 - webOS wrapper cannot provide equivalent native preload semantics for arbitrary third-party targets.
 
 Impact:
-- Deterministic bootstrap is guaranteed for this fork-hosted path by staged bridge injection before `main.js` in `/release/index.html`.
+- Deterministic bootstrap is guaranteed for this fork-hosted path by staged bridge injection before `main.js` in channel roots (`/release/index.html`, `/dev/index.html`).
 
 ## 5) DNS Filtering / Sinkhole Side Effects
 
@@ -87,15 +87,17 @@ Impact:
 - Sync XHR can still block main thread under poor network conditions.
 - Timeout/circuit-breaker hardening reduces, but cannot eliminate, this trade-off.
 
-## 9) Hosted Path Coupling (`/release`)
+## 9) Hosted Channel Coupling (`/release`, `/dev`)
 
 Status: **Intentionally retained**
 
 Reason:
-- Wrapper defaults, hosted artifact structure, and sync/deploy tooling are coupled to `/release/index.html`.
+- Stable wrapper defaults are coupled to `/release/index.html`.
+- Dev prerelease wrapper defaults are coupled to `/dev/index.html`.
+- Pages deployment composes both channels in one artifact (`/release` from `master`, `/dev` from `dev/pages-publish`).
 
 Impact:
-- Removing `/release` requires a dedicated migration refactor.
+- Removing or renaming hosted channels requires a dedicated migration refactor across wrapper defaults and CI workflows.
 
 ## Related Docs
 - Current implementation/parity snapshot: `docs/WEBOS_PORTING_STATUS.md`

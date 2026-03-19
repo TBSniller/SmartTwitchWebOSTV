@@ -5,19 +5,22 @@ const root = path.resolve(__dirname, '..', '..');
 const releaseSourceDir = path.join(root, 'release');
 const bridgeSource = path.join(root, 'webos', 'bridge', 'webosCompatBridge.js');
 const defaultOutputRoot = path.join(root, '.tmp', 'hosted-release-artifact');
+const defaultChannel = 'release';
 const bridgeTag = '<script src="githubio/js/webosCompatBridge.js"></script>';
 const mainScriptRegex = /<script\b(?=[^>]*\bsrc\s*=\s*['"][^'"]*githubio\/js\/main\.js(?:\?[^'"]*)?['"])[^>]*>\s*<\/script>/i;
 const anyBridgeTagRegex = /<script\b(?=[^>]*\bsrc\s*=\s*['"][^'"]*webos(?:Hosted|Compat)Bridge\.js(?:\?[^'"]*)?['"])[^>]*>\s*<\/script>\s*/gi;
 const bridgeTagGlobalRegex = /<script\b(?=[^>]*\bsrc\s*=\s*['"][^'"]*githubio\/js\/webosCompatBridge\.js(?:\?[^'"]*)?['"])[^>]*>\s*<\/script>/gi;
 const bridgeTagSingleRegex = /<script\b(?=[^>]*\bsrc\s*=\s*['"][^'"]*githubio\/js\/webosCompatBridge\.js(?:\?[^'"]*)?['"])[^>]*>\s*<\/script>/i;
+const validChannelRegex = /^[A-Za-z0-9._-]+$/;
 
 function parseArgs(argv) {
     let outputRoot = defaultOutputRoot;
+    let channel = defaultChannel;
 
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
         if (arg === '--help' || arg === '-h') {
-            console.log('Usage: node tools/upstream/prepareHostedRelease.js [--out-dir <dir>]');
+            console.log('Usage: node tools/upstream/prepareHostedRelease.js [--out-dir <dir>] [--channel <name>]');
             process.exit(0);
         }
 
@@ -36,10 +39,25 @@ function parseArgs(argv) {
             continue;
         }
 
+        if (arg === '--channel') {
+            const next = argv[index + 1];
+            if (!next) {
+                throw new Error('Missing value for --channel');
+            }
+            channel = resolveChannel(next);
+            index += 1;
+            continue;
+        }
+
+        if (arg.indexOf('--channel=') === 0) {
+            channel = resolveChannel(arg.slice('--channel='.length));
+            continue;
+        }
+
         throw new Error('Unknown argument: ' + arg);
     }
 
-    return {outputRoot};
+    return {outputRoot, channel};
 }
 
 function resolveOutputRoot(value) {
@@ -50,6 +68,13 @@ function resolveOutputRoot(value) {
         return value;
     }
     return path.resolve(root, value);
+}
+
+function resolveChannel(value) {
+    if (!value || !validChannelRegex.test(value)) {
+        throw new Error('Invalid channel value: ' + value);
+    }
+    return value;
 }
 
 function ensureSourceInputs() {
@@ -65,28 +90,65 @@ function ensureSourceInputs() {
     }
 }
 
-function buildArtifact(outputRoot) {
-    const stagedReleaseDir = path.join(outputRoot, 'release');
-    const stagedBridgePath = path.join(stagedReleaseDir, 'githubio', 'js', 'webosCompatBridge.js');
-    const stagedIndexPath = path.join(stagedReleaseDir, 'index.html');
+function replaceRequired(content, pattern, replacement, label) {
+    const next = content.replace(pattern, replacement);
+    if (next === content) {
+        throw new Error('Failed to patch staged bridge for channel: missing ' + label);
+    }
+    return next;
+}
 
-    fs.rmSync(outputRoot, {recursive: true, force: true});
+function adaptBridgeForChannel(stagedBridgePath, channel) {
+    if (channel !== 'dev') {
+        return;
+    }
+
+    let bridge = fs.readFileSync(stagedBridgePath, 'utf8');
+    bridge = replaceRequired(
+        bridge,
+        /var\s+FORK_RELEASE_URL\s*=\s*FORK_BASE_URL\s*\+\s*'\/release\/index\.html';/,
+        "var FORK_RELEASE_URL = FORK_BASE_URL + '/dev/index.html';",
+        'FORK_RELEASE_URL'
+    );
+    bridge = replaceRequired(
+        bridge,
+        /var\s+FORK_VERSION_URL\s*=\s*FORK_BASE_URL\s*\+\s*'\/release\/githubio\/version\/version\.json';/,
+        "var FORK_VERSION_URL = FORK_BASE_URL + '/dev/githubio/version/version.json';",
+        'FORK_VERSION_URL'
+    );
+    bridge = replaceRequired(
+        bridge,
+        /var\s+markers\s*=\s*\['\/release\/',\s*'\/hosted\/',\s*'\/webos\/app\/'\];/,
+        "var markers = ['/dev/', '/hosted/', '/webos/app/'];",
+        'normalizeReloadUrl markers'
+    );
+    fs.writeFileSync(stagedBridgePath, bridge);
+}
+
+function buildArtifact(outputRoot, channel) {
+    const stagedChannelDir = path.join(outputRoot, channel);
+    const stagedBridgePath = path.join(stagedChannelDir, 'githubio', 'js', 'webosCompatBridge.js');
+    const stagedIndexPath = path.join(stagedChannelDir, 'index.html');
+
+    fs.rmSync(stagedChannelDir, {recursive: true, force: true});
     fs.mkdirSync(outputRoot, {recursive: true});
-    fs.cpSync(releaseSourceDir, stagedReleaseDir, {recursive: true});
+    fs.cpSync(releaseSourceDir, stagedChannelDir, {recursive: true});
     fs.mkdirSync(path.dirname(stagedBridgePath), {recursive: true});
     fs.copyFileSync(bridgeSource, stagedBridgePath);
+    adaptBridgeForChannel(stagedBridgePath, channel);
 
     let html = fs.readFileSync(stagedIndexPath, 'utf8');
     html = html.replace(anyBridgeTagRegex, '');
 
     if (!mainScriptRegex.test(html)) {
-        throw new Error('Cannot find main.js script tag in staged release/index.html');
+        throw new Error('Cannot find main.js script tag in staged ' + channel + '/index.html');
     }
     html = html.replace(mainScriptRegex, bridgeTag + '$&');
     fs.writeFileSync(stagedIndexPath, html);
 
     return {
-        stagedReleaseDir,
+        channel,
+        stagedChannelDir,
         stagedBridgePath,
         stagedIndexPath
     };
@@ -116,9 +178,9 @@ function validateArtifact(paths) {
 function main() {
     const args = parseArgs(process.argv.slice(2));
     ensureSourceInputs();
-    const staged = buildArtifact(args.outputRoot);
+    const staged = buildArtifact(args.outputRoot, args.channel);
     validateArtifact(staged);
-    console.log('Prepared hosted release artifact at: ' + args.outputRoot);
+    console.log('Prepared hosted release artifact at: ' + path.join(args.outputRoot, staged.channel));
 }
 
 main();

@@ -3,9 +3,9 @@
 This document is the canonical current-state snapshot for wrapper/bridge parity in this fork.
 
 ## Architecture Status
-- webOS wrapper app (`webos/app`) launches hosted `release/index.html`.
+- webOS stable wrapper app (`webos/app`) launches hosted `release/index.html`.
 - Hosted bridge source is `webos/bridge/webosCompatBridge.js`.
-- Deploy staging injects `webosCompatBridge.js` before upstream `main.js` in staged `release/index.html`.
+- Deploy staging injects `webosCompatBridge.js` before upstream `main.js` in staged hosted channels (`release/index.html`, `dev/index.html`).
 - Tracked `release/` is maintained as an upstream mirror (no tracked bridge patching).
 - Upstream `app/` remains unmodified for webOS adaptation.
 
@@ -38,8 +38,9 @@ Canonical rationale is in `docs/WEBOS_LIMITATIONS.md`.
 
 ## Automation Status
 - Upstream sync automation exists in `.github/workflows/sync-upstream-release.yml`.
-- Pages deploy automation exists in `.github/workflows/deploy-pages.yml`.
+- Pages deploy automation exists in `.github/workflows/deploy-pages.yml` and publishes both `/release` and `/dev`.
 - Tag-based release automation exists in `.github/workflows/release.yml`.
+- Manual dev prerelease automation exists in `.github/workflows/release-dev-prerelease.yml`.
 
 ## Related Docs
 - Upstream sync procedure: `docs/UPSTREAM_SYNC_PLAYBOOK.md`

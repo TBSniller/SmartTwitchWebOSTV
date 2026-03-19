@@ -46,3 +46,4 @@ todo.txt
 .tmp/
 build/
 .claude/settings.local.json
+tmp/apps-repo/

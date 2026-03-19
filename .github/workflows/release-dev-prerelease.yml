@@ -1,0 +1,112 @@
+name: Build Dev Prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Optional reason for manual dev prerelease
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-prerelease
+  cancel-in-progress: false
+
+jobs:
+  build-dev-prerelease:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Ensure workflow is run from dev/pages-publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" != "dev/pages-publish" ]]; then
+            echo "This workflow must run from dev/pages-publish. Got: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+      - name: Compute next dev prerelease number
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags origin
+
+          LAST="$(git tag -l 'dev-[0-9]*' | sed -E 's/^dev-//' | sort -n | tail -n 1)"
+          if [[ -z "${LAST}" ]]; then
+            DEV_NUM=1
+          else
+            DEV_NUM=$((LAST + 1))
+          fi
+
+          echo "dev_number=${DEV_NUM}" >> "$GITHUB_OUTPUT"
+          echo "dev_tag=dev-${DEV_NUM}" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare hosted deploy artifact (validation only)
+        run: npm run hosted:prepare
+
+      - name: Run lint checks
+        run: npm run lint
+
+      - name: Prepare dev app variant
+        run: |
+          node tools/release/prepareDevAppVariant.js \
+            --out-dir .tmp/dev-app \
+            --dev-number "${{ steps.version.outputs.dev_number }}" \
+            --target-url "https://tbsniller.github.io/SmartTwitchWebOSTV/dev/index.html"
+
+      - name: Build dev webOS package
+        run: npx ares-package .tmp/dev-app -o build/
+
+      - name: Generate prerelease manifest
+        run: |
+          node tools/release/generatePrereleaseManifest.js \
+            --appinfo .tmp/dev-app/appinfo.json \
+            --release-tag "${{ steps.version.outputs.dev_tag }}" \
+            --build-dir build
+
+      - name: Resolve release artifact names
+        id: artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEV_ID="$(node -p "require('./.tmp/dev-app/appinfo.json').id")"
+          DEV_VERSION="$(node -p "require('./.tmp/dev-app/appinfo.json').version")"
+          echo "ipk_name=${DEV_ID}_${DEV_VERSION}_all.ipk" >> "$GITHUB_OUTPUT"
+          echo "manifest_name=${DEV_ID}.manifest.json" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub prerelease
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.version.outputs.dev_tag }}
+          name: Dev Pre-release ${{ steps.version.outputs.dev_tag }}
+          draft: false
+          prerelease: true
+          allowUpdates: false
+          omitBodyDuringUpdate: true
+          body: |
+            Automated dev prerelease from `dev/pages-publish`.
+
+            - Prerelease tag: `${{ steps.version.outputs.dev_tag }}`
+            - Hosted app channel: `https://tbsniller.github.io/SmartTwitchWebOSTV/dev/index.html`
+            - App id suffix: `.dev`
+            - App version: `0.0.${{ steps.version.outputs.dev_number }}`
+          artifacts: build/${{ steps.artifacts.outputs.ipk_name }},build/${{ steps.artifacts.outputs.manifest_name }}
