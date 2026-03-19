@@ -283,6 +283,30 @@
     var lastPreviewRect = {left: -1, top: -1, width: -1, height: -1};    // Cached applyRect values for preview.
     var VERSION_REFRESH_MIN_INTERVAL_MS = 10 * 60 * 1000;
     var BACK_DISPATCH_KEY = 113; // Android bridge uses KEYCODE_F2 as "back"
+    var BRIDGE_DEBUG_ENABLED = isBridgeDebugEnabled();
+    var PLAYER_SCENE_OPT_CHAT_MAX = 72;
+    var PLAYER_SCENE_OPT_RECENT_ACTIVE = 48;
+    var PLAYER_SCENE_OPT_VISIBILITY_MARGIN_PX = 96;
+    var PLAYER_SCENE_OPT_MUTATION_DEBOUNCE_MS = 180;
+    var PLAYER_SCENE_OPT_FALLBACK_INTERVAL_MS = 1200;
+    var PLAYER_SCENE_OPT_SCENE_POLL_MS = 900;
+    var PLAYER_SCENE_OPT_MAX_PRUNE_PER_PASS = 12;
+    var PLAYER_SCENE_OPT_MAX_MEDIA_OPS_PER_PASS = 64;
+    var PLAYER_SCENE_OPT_PLACEHOLDER_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+    var playerSceneOptimizerMonitorId = 0;
+    var playerSceneOptimizer = {
+        active: false,
+        pendingReason: '',
+        runTimerId: 0,
+        fallbackTimerId: 0,
+        scene: null,
+        styleNode: null,
+        mutationObserver: null,
+        attrObservers: [],
+        chatBoxes: [null, null],
+        chatContainers: [null, null],
+        chatHolders: [null, null]
+    };
     // =========================================================================
     // Bootstrap Sequence (runs immediately at parse time)
     // =========================================================================
@@ -321,6 +345,31 @@
         } catch (e) {
             return f;
         }
+    }
+    function isBridgeDebugEnabled() {
+        try {
+            if (w.location && typeof w.location.search === 'string' && /(?:\?|&)sttv_debug=1(?:&|$)/.test(w.location.search)) return true;
+        } catch (e) {}
+        try {
+            return !!(w.localStorage && w.localStorage.getItem('STTV_DEBUG') === '1');
+        } catch (e2) {
+            return false;
+        }
+    }
+    function bridgeDebugLog(event, extra) {
+        if (!BRIDGE_DEBUG_ENABLED) return;
+        var payload = {event: event || 'event', t: Date.now()};
+        if (extra && typeof extra === 'object') {
+            var key;
+            for (key in extra) {
+                if (Object.prototype.hasOwnProperty.call(extra, key)) payload[key] = extra[key];
+            }
+        }
+        try {
+            if (w.console && typeof w.console.log === 'function') {
+                w.console.log('[STTV webOS bridge]', JSON.stringify(payload));
+            }
+        } catch (e3) {}
     }
     // Polyfills for ES6+ features missing on older webOS WebKit runtimes.
     // Android: modern WebView has these natively. webOS 3.x/4.x may not.
@@ -1173,20 +1222,23 @@
         v.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;background:#000;object-fit:cover;display:none;pointer-events:none;z-index:' + z;
         return v;
     }
-    // Lazily creates the root container, main (mv) and preview (pv) video elements,
-    // and installs all event handlers. Called once on first playback request.
+    function ensureRoot() {
+        if (!w.document || !w.document.body) return false;
+        if (!root) {
+            root = w.document.createElement('div');
+            root.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:1';
+        }
+        if (!root.parentNode) {
+            w.document.body.insertBefore(root, w.document.body.firstChild);
+        }
+        return true;
+    }
+    // Lazily creates root + main video and installs main event handlers.
     function ensure() {
-        if (root || !w.document || !w.document.body) return;
-        root = w.document.createElement('div');
-        root.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:1';
+        if (!ensureRoot()) return;
+        if (mv) return;
         mv = makeVideo('sttv_main', 2);
-        pv = makeVideo('sttv_preview', 4);
-        pv.muted = true;
-        pv.defaultMuted = true;
-        pv.setAttribute('muted', 'muted');
         root.appendChild(mv);
-        root.appendChild(pv);
-        w.document.body.insertBefore(root, w.document.body.firstChild);
         // --- Main video event handlers ---
         // These map HTML5 video events to the upstream app's ExoPlayer callback flow.
         // Android: ExoPlayer.Listener.onPlaybackStateChanged() etc.
@@ -1295,6 +1347,16 @@
             if (retryMainPlayback()) return;
             handleMainPlaybackFailure(1, mv && mv.error ? mv.error.code || 0 : 0);
         });
+    }
+    // Lazily creates preview video and installs preview event handlers.
+    function ensurePreview() {
+        if (!ensureRoot()) return;
+        if (pv) return;
+        pv = makeVideo('sttv_preview', 4);
+        pv.muted = true;
+        pv.defaultMuted = true;
+        pv.setAttribute('muted', 'muted');
+        root.appendChild(pv);
         // --- Preview video event handlers (mirror main with preview-specific behavior) ---
         pv.addEventListener('loadedmetadata', function () {
             if (ps.resume > 0 && ps.type === 2) try { pv.currentTime = Math.max(0, ps.resume / 1000); } catch (e) {}
@@ -2202,7 +2264,6 @@
     // Android: StartAuto with player > 0 → secondary ExoPlayer.
     // webOS:   single hardware decoder, so only non-concurrent modes are allowed.
     function setPrev(u, pl, t, rs, m, s, mp) {
-        ensure();
         var now = Date.now();
         var mode = m || 'preview';
         var slot = clamp(s || 1, 1, 3);
@@ -2227,6 +2288,7 @@
             else showMultiLimitNotice();
             return false;
         }
+        ensurePreview();
         requestFeedLoadingShow();
         ps.type = type;
         ps.rawUri = rawUri;
@@ -3057,6 +3119,7 @@
             var wrapped = function () {
                 var result = original.apply(this, arguments);
                 stopMainIfLeavingPlayerScene(delay);
+                updatePlayerSceneOptimizerState('scene_safety_patch');
                 return result;
             };
             wrapped.__sttvSceneSafetyPatched = true;
@@ -3214,6 +3277,372 @@
         if (patchVodSafetyFlow()) return;
         w.setTimeout(patchVodSafetyFlow, 1000);
         w.setTimeout(patchVodSafetyFlow, 2500);
+    }
+    // =========================================================================
+    // Player Scene Optimizer (webOS-only)
+    // =========================================================================
+    function hasCssClass(element, className) {
+        if (!element || !className) return false;
+        try {
+            if (element.classList && typeof element.classList.contains === 'function') return element.classList.contains(className);
+        } catch (e) {}
+        var cls = element.className;
+        if (typeof cls !== 'string' || !cls) return false;
+        return (' ' + cls + ' ').indexOf(' ' + className + ' ') >= 0;
+    }
+    function isOptimizerElementHidden(element) {
+        if (!element) return true;
+        if (hasCssClass(element, 'hide')) return true;
+        if (!element.style) return false;
+        if (element.style.display === 'none') return true;
+        if (element.style.visibility === 'hidden') return true;
+        if (element.style.opacity === '0') return true;
+        return false;
+    }
+    function nodeContainsNode(parent, child) {
+        if (!parent || !child) return false;
+        try {
+            if (typeof parent.contains === 'function') return parent.contains(child);
+        } catch (e) {}
+        var current = child;
+        while (current) {
+            if (current === parent) return true;
+            current = current.parentNode;
+        }
+        return false;
+    }
+    function isPlayerSceneActiveForOptimizer() {
+        var isVisible = false;
+        try {
+            if (typeof w.Main_isScene2DocVisible === 'function') isVisible = !!w.Main_isScene2DocVisible();
+        } catch (e) {}
+        if (!w.document) return isVisible;
+        var scene = w.document.getElementById('scene2');
+        if (!scene) return isVisible;
+        if (isOptimizerElementHidden(scene)) return false;
+        if (isVisible) return true;
+        try {
+            var opacityValue = parseFloat(scene.style && scene.style.opacity ? scene.style.opacity : '');
+            if (isFinite(opacityValue)) return opacityValue > 0;
+        } catch (e2) {}
+        if (scene.style && scene.style.pointerEvents === 'none') return false;
+        return true;
+    }
+    function ensurePlayerSceneOptimizerStyle() {
+        if (!w.document) return;
+        var scene = w.document.getElementById('scene2');
+        if (!playerSceneOptimizer.styleNode) {
+            var style = w.document.getElementById('sttv_webos_player_optimizer_style');
+            if (!style) {
+                style = w.document.createElement('style');
+                style.id = 'sttv_webos_player_optimizer_style';
+                var css =
+                    '#scene2 #chat_container0 .emoticon,#scene2 #chat_container1 .emoticon{min-width:1.55em;height:1.55em;margin-bottom:-0.30em;}' +
+                    '#scene2 #chat_container0 .emoji,#scene2 #chat_container1 .emoji{min-width:0.95em;height:0.95em;margin-right:0.08em;margin-left:0.08em;}' +
+                    '#scene2 #chat_container0 .tag,#scene2 #chat_container1 .tag{min-width:1.2em;height:1.2em;margin-right:0.16em;}';
+                if (style.styleSheet) style.styleSheet.cssText = css;
+                else style.appendChild(w.document.createTextNode(css));
+            }
+            playerSceneOptimizer.styleNode = style;
+        }
+        if (!playerSceneOptimizer.styleNode) return;
+        if (scene && playerSceneOptimizer.styleNode.parentNode !== scene) {
+            try { scene.appendChild(playerSceneOptimizer.styleNode); } catch (e3) {}
+            return;
+        }
+        if (!playerSceneOptimizer.styleNode.parentNode) {
+            var parent = w.document.head || w.document.body;
+            if (parent) {
+                try { parent.appendChild(playerSceneOptimizer.styleNode); } catch (e4) {}
+            }
+        }
+    }
+    function refreshPlayerSceneOptimizerTargets() {
+        if (!w.document) return;
+        playerSceneOptimizer.scene = w.document.getElementById('scene2');
+        playerSceneOptimizer.chatBoxes[0] = w.document.getElementById('chat_box0');
+        playerSceneOptimizer.chatBoxes[1] = w.document.getElementById('chat_box1');
+        playerSceneOptimizer.chatContainers[0] = w.document.getElementById('chat_container0');
+        playerSceneOptimizer.chatContainers[1] = w.document.getElementById('chat_container1');
+        playerSceneOptimizer.chatHolders[0] = w.document.getElementById('chat_box_holder0');
+        playerSceneOptimizer.chatHolders[1] = w.document.getElementById('chat_box_holder1');
+    }
+    function clearPlayerSceneOptimizerRunTimer() {
+        if (!playerSceneOptimizer.runTimerId) return;
+        w.clearTimeout(playerSceneOptimizer.runTimerId);
+        playerSceneOptimizer.runTimerId = 0;
+    }
+    function clearPlayerSceneOptimizerFallbackTimer() {
+        if (!playerSceneOptimizer.fallbackTimerId) return;
+        w.clearInterval(playerSceneOptimizer.fallbackTimerId);
+        playerSceneOptimizer.fallbackTimerId = 0;
+    }
+    function disconnectPlayerSceneOptimizerObservers() {
+        if (playerSceneOptimizer.mutationObserver) {
+            try { playerSceneOptimizer.mutationObserver.disconnect(); } catch (e) {}
+            playerSceneOptimizer.mutationObserver = null;
+        }
+        if (playerSceneOptimizer.attrObservers && playerSceneOptimizer.attrObservers.length) {
+            var i;
+            for (i = 0; i < playerSceneOptimizer.attrObservers.length; i++) {
+                try { playerSceneOptimizer.attrObservers[i].disconnect(); } catch (e2) {}
+            }
+        }
+        playerSceneOptimizer.attrObservers = [];
+    }
+    function schedulePlayerSceneOptimizerRun(reason, delayMs) {
+        if (!playerSceneOptimizer.active) return;
+        if (reason) playerSceneOptimizer.pendingReason = reason;
+        if (playerSceneOptimizer.runTimerId) return;
+        playerSceneOptimizer.runTimerId = w.setTimeout(function () {
+            playerSceneOptimizer.runTimerId = 0;
+            var runReason = playerSceneOptimizer.pendingReason || 'scheduled';
+            playerSceneOptimizer.pendingReason = '';
+            runPlayerSceneOptimizer(runReason);
+        }, delayMs > 0 ? delayMs : PLAYER_SCENE_OPT_MUTATION_DEBOUNCE_MS);
+    }
+    function rowIsVisibleForOptimizer(row, boxRect, marginPx) {
+        if (!row || !boxRect || typeof row.getBoundingClientRect !== 'function') return false;
+        try {
+            var rect = row.getBoundingClientRect();
+            if (!rect) return false;
+            var m = marginPx > 0 ? marginPx : 0;
+            if (rect.bottom < boxRect.top - m) return false;
+            if (rect.top > boxRect.bottom + m) return false;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+    function downgradeImageNodeForOptimizer(imageNode) {
+        if (!imageNode) return false;
+        if (imageNode.getAttribute('data-sttv-img-downgraded') === '1') return false;
+        var srcValue = imageNode.getAttribute('src') || '';
+        var srcsetValue = imageNode.getAttribute('srcset') || '';
+        if (!srcValue && !srcsetValue) return false;
+        imageNode.setAttribute('data-sttv-img-src', srcValue);
+        imageNode.setAttribute('data-sttv-img-srcset', srcsetValue);
+        imageNode.setAttribute('data-sttv-img-downgraded', '1');
+        try { imageNode.removeAttribute('srcset'); } catch (e) {}
+        try { imageNode.setAttribute('src', PLAYER_SCENE_OPT_PLACEHOLDER_IMAGE); } catch (e2) {}
+        return true;
+    }
+    function restoreImageNodeForOptimizer(imageNode) {
+        if (!imageNode) return false;
+        if (imageNode.getAttribute('data-sttv-img-downgraded') !== '1') return false;
+        var srcValue = imageNode.getAttribute('data-sttv-img-src') || '';
+        var srcsetValue = imageNode.getAttribute('data-sttv-img-srcset') || '';
+        if (srcsetValue) imageNode.setAttribute('srcset', srcsetValue);
+        else imageNode.removeAttribute('srcset');
+        if (srcValue) imageNode.setAttribute('src', srcValue);
+        imageNode.removeAttribute('data-sttv-img-src');
+        imageNode.removeAttribute('data-sttv-img-srcset');
+        imageNode.removeAttribute('data-sttv-img-downgraded');
+        return true;
+    }
+    function downgradeTagNodeForOptimizer(tagNode) {
+        if (!tagNode || tagNode.getAttribute('data-sttv-tag-downgraded') === '1') return false;
+        var backgroundImage = '';
+        try {
+            backgroundImage = tagNode.style && typeof tagNode.style.backgroundImage === 'string' ? tagNode.style.backgroundImage : '';
+        } catch (e) {}
+        tagNode.setAttribute('data-sttv-tag-bg', backgroundImage);
+        tagNode.setAttribute('data-sttv-tag-downgraded', '1');
+        try {
+            if (tagNode.style) tagNode.style.backgroundImage = 'none';
+        } catch (e2) {}
+        return true;
+    }
+    function restoreTagNodeForOptimizer(tagNode) {
+        if (!tagNode || tagNode.getAttribute('data-sttv-tag-downgraded') !== '1') return false;
+        var backgroundImage = tagNode.getAttribute('data-sttv-tag-bg') || '';
+        try {
+            if (tagNode.style) tagNode.style.backgroundImage = backgroundImage;
+        } catch (e) {}
+        tagNode.removeAttribute('data-sttv-tag-bg');
+        tagNode.removeAttribute('data-sttv-tag-downgraded');
+        return true;
+    }
+    function downgradeRowMediaForOptimizer(row, budget, stats) {
+        if (!row || !budget || budget.ops <= 0) return;
+        var images = row.getElementsByTagName ? row.getElementsByTagName('img') : [];
+        var i;
+        for (i = 0; i < images.length && budget.ops > 0; i++) {
+            if (downgradeImageNodeForOptimizer(images[i])) {
+                budget.ops -= 1;
+                stats.downgraded += 1;
+            }
+        }
+        var tags = row.getElementsByClassName ? row.getElementsByClassName('tag') : [];
+        for (i = 0; i < tags.length && budget.ops > 0; i++) {
+            if (downgradeTagNodeForOptimizer(tags[i])) {
+                budget.ops -= 1;
+                stats.downgraded += 1;
+            }
+        }
+    }
+    function restoreRowMediaForOptimizer(row, budget, stats) {
+        if (!row || !budget || budget.ops <= 0) return;
+        var images = row.getElementsByTagName ? row.getElementsByTagName('img') : [];
+        var i;
+        for (i = 0; i < images.length && budget.ops > 0; i++) {
+            if (restoreImageNodeForOptimizer(images[i])) {
+                budget.ops -= 1;
+                stats.restored += 1;
+            }
+        }
+        var tags = row.getElementsByClassName ? row.getElementsByClassName('tag') : [];
+        for (i = 0; i < tags.length && budget.ops > 0; i++) {
+            if (restoreTagNodeForOptimizer(tags[i])) {
+                budget.ops -= 1;
+                stats.restored += 1;
+            }
+        }
+    }
+    function processChatBoxForOptimizer(chatBox, chatContainer, stats, budget) {
+        if (!chatBox || !chatBox.getElementsByClassName) return;
+        var holders = chatBox.getElementsByClassName('chat_line_holder');
+        if (!holders || !holders.length) return;
+        var overflow = holders.length - PLAYER_SCENE_OPT_CHAT_MAX;
+        var prunedCount = 0;
+        var activeElement = w.document && w.document.activeElement ? w.document.activeElement : null;
+        while (overflow > 0 && holders.length > 0 && prunedCount < PLAYER_SCENE_OPT_MAX_PRUNE_PER_PASS) {
+            var oldest = holders[0];
+            if (!oldest || oldest.parentNode !== chatBox) break;
+            if (activeElement && nodeContainsNode(oldest, activeElement)) break;
+            chatBox.removeChild(oldest);
+            prunedCount += 1;
+            overflow -= 1;
+        }
+        if (prunedCount > 0) stats.pruned += prunedCount;
+        if (!holders.length) return;
+        var staleBoundary = holders.length - PLAYER_SCENE_OPT_RECENT_ACTIVE;
+        if (staleBoundary < 0) staleBoundary = 0;
+        var containerVisible = !isOptimizerElementHidden(chatContainer);
+        var boxRect = null;
+        if (containerVisible && typeof chatBox.getBoundingClientRect === 'function') {
+            try { boxRect = chatBox.getBoundingClientRect(); } catch (e) { boxRect = null; }
+        }
+        var i;
+        for (i = 0; i < holders.length && budget.ops > 0; i++) {
+            var row = holders[i];
+            if (!row || row.parentNode !== chatBox) continue;
+            if (i >= staleBoundary) {
+                restoreRowMediaForOptimizer(row, budget, stats);
+                continue;
+            }
+            if (!containerVisible || !rowIsVisibleForOptimizer(row, boxRect, PLAYER_SCENE_OPT_VISIBILITY_MARGIN_PX)) {
+                downgradeRowMediaForOptimizer(row, budget, stats);
+            } else {
+                restoreRowMediaForOptimizer(row, budget, stats);
+            }
+        }
+    }
+    function runPlayerSceneOptimizer(reason) {
+        if (!playerSceneOptimizer.active) return;
+        if (!isPlayerSceneActiveForOptimizer()) {
+            deactivatePlayerSceneOptimizer('scene_hidden');
+            return;
+        }
+        refreshPlayerSceneOptimizerTargets();
+        ensurePlayerSceneOptimizerStyle();
+        var stats = {pruned: 0, downgraded: 0, restored: 0};
+        var budget = {ops: PLAYER_SCENE_OPT_MAX_MEDIA_OPS_PER_PASS};
+        processChatBoxForOptimizer(playerSceneOptimizer.chatBoxes[0], playerSceneOptimizer.chatContainers[0], stats, budget);
+        processChatBoxForOptimizer(playerSceneOptimizer.chatBoxes[1], playerSceneOptimizer.chatContainers[1], stats, budget);
+        if (stats.pruned > 0 || stats.downgraded > 0 || stats.restored > 0) {
+            bridgeDebugLog('player_scene_optimizer_run', {
+                reason: reason || 'run',
+                pruned: stats.pruned,
+                downgraded: stats.downgraded,
+                restored: stats.restored,
+                budgetLeft: budget.ops
+            });
+        }
+    }
+    function installPlayerSceneOptimizerObservers() {
+        disconnectPlayerSceneOptimizerObservers();
+        clearPlayerSceneOptimizerFallbackTimer();
+        refreshPlayerSceneOptimizerTargets();
+        var MutationObserverCtor = w.MutationObserver || w.WebKitMutationObserver;
+        var hasChildTargets = false;
+        var hasAttrTargets = false;
+        if (MutationObserverCtor) {
+            var mutationObserver = new MutationObserverCtor(function () {
+                schedulePlayerSceneOptimizerRun('chat_mutation', PLAYER_SCENE_OPT_MUTATION_DEBOUNCE_MS);
+            });
+            var i;
+            for (i = 0; i < playerSceneOptimizer.chatBoxes.length; i++) {
+                if (!playerSceneOptimizer.chatBoxes[i]) continue;
+                try {
+                    mutationObserver.observe(playerSceneOptimizer.chatBoxes[i], {childList: true});
+                    hasChildTargets = true;
+                } catch (e) {}
+            }
+            if (hasChildTargets) {
+                playerSceneOptimizer.mutationObserver = mutationObserver;
+            } else {
+                try { mutationObserver.disconnect(); } catch (e2) {}
+            }
+            var attrTargets = [
+                playerSceneOptimizer.scene,
+                playerSceneOptimizer.chatContainers[0],
+                playerSceneOptimizer.chatContainers[1],
+                playerSceneOptimizer.chatHolders[0],
+                playerSceneOptimizer.chatHolders[1]
+            ];
+            var attrObserver = new MutationObserverCtor(function () {
+                schedulePlayerSceneOptimizerRun('chat_visibility', PLAYER_SCENE_OPT_MUTATION_DEBOUNCE_MS);
+            });
+            for (i = 0; i < attrTargets.length; i++) {
+                if (!attrTargets[i]) continue;
+                try {
+                    attrObserver.observe(attrTargets[i], {attributes: true, attributeFilter: ['class', 'style']});
+                    hasAttrTargets = true;
+                } catch (e3) {}
+            }
+            if (hasAttrTargets) {
+                playerSceneOptimizer.attrObservers.push(attrObserver);
+            } else {
+                try { attrObserver.disconnect(); } catch (e4) {}
+            }
+        }
+        if (!MutationObserverCtor || (!hasChildTargets && !hasAttrTargets)) {
+            playerSceneOptimizer.fallbackTimerId = w.setInterval(function () {
+                runPlayerSceneOptimizer('fallback_poll');
+            }, PLAYER_SCENE_OPT_FALLBACK_INTERVAL_MS);
+        }
+    }
+    function activatePlayerSceneOptimizer(reason) {
+        if (playerSceneOptimizer.active) {
+            schedulePlayerSceneOptimizerRun(reason || 'scene_active', 30);
+            return;
+        }
+        playerSceneOptimizer.active = true;
+        ensurePlayerSceneOptimizerStyle();
+        installPlayerSceneOptimizerObservers();
+        schedulePlayerSceneOptimizerRun(reason || 'scene_enter', 40);
+        bridgeDebugLog('player_scene_optimizer_active', {reason: reason || 'activate'});
+    }
+    function deactivatePlayerSceneOptimizer(reason) {
+        if (!playerSceneOptimizer.active && !playerSceneOptimizer.runTimerId && !playerSceneOptimizer.fallbackTimerId) return;
+        playerSceneOptimizer.active = false;
+        playerSceneOptimizer.pendingReason = '';
+        clearPlayerSceneOptimizerRunTimer();
+        clearPlayerSceneOptimizerFallbackTimer();
+        disconnectPlayerSceneOptimizerObservers();
+        bridgeDebugLog('player_scene_optimizer_inactive', {reason: reason || 'deactivate'});
+    }
+    function updatePlayerSceneOptimizerState(reason) {
+        if (isPlayerSceneActiveForOptimizer()) activatePlayerSceneOptimizer(reason || 'scene_visible');
+        else deactivatePlayerSceneOptimizer(reason || 'scene_hidden');
+    }
+    function installPlayerSceneOptimizerMonitor() {
+        if (playerSceneOptimizerMonitorId) return;
+        updatePlayerSceneOptimizerState('bootstrap');
+        playerSceneOptimizerMonitorId = w.setInterval(function () {
+            updatePlayerSceneOptimizerState('scene_poll');
+        }, PLAYER_SCENE_OPT_SCENE_POLL_MS);
     }
     function getStoredWebTag() {
         try {
@@ -3995,32 +4424,32 @@
     }
 
     // --- Bridge bootstrap sequence ---
-    // 1) Ensure host DOM placeholders exist.
-    ensure();
-    // 2) Publish Android compatibility API surface.
+    // 1) Publish Android compatibility API surface.
     initAndroid();
-    // 3) Attach webOS lifecycle listeners (visibility/pageshow/back handling).
+    // 2) Attach webOS lifecycle listeners (visibility/pageshow/back handling).
     installLifecycleHooks();
-    // 4) Force webOS-safe defaults in shared Settings_value tree.
+    // 3) Force webOS-safe defaults in shared Settings_value tree.
     applyWebOSDefaultSettings();
-    // 5) Keep legacy KEY_RETURN/back aliases consistent.
+    // 4) Keep legacy KEY_RETURN/back aliases consistent.
     enforceBackKeyConstant();
-    // 6) Patch upstream back-key bridge callsites.
+    // 5) Patch upstream back-key bridge callsites.
     installBackAliasBridge();
     w.__sttvWebOSBridgeReady = true;
-    // 7) Restore OSInterface globals once bridge is available.
+    // 6) Restore OSInterface globals once bridge is available.
     recoverOSInterfaceState();
-    // 8) Resume any playback/lifecycle work deferred during hidden state.
+    // 7) Resume any playback/lifecycle work deferred during hidden state.
     tryLifecycleResume();
-    // 9) Patch selected upstream update flows with webOS-safe variants.
+    // 8) Patch selected upstream update flows with webOS-safe variants.
     patchMainUpdateFlow();
     patchUpdateResultFlow();
     ensureVodSafetyPatches();
     // Keep upstream proxy selection behavior. Bridge does not force provider defaults.
-    // 10) Install launch/relaunch event bridge.
+    // 9) Install launch/relaunch event bridge.
     initLaunch();
-    // 11) Harden scene transitions and start periodic version checks.
+    // 10) Harden scene transitions and start player-scene optimizer.
     installSceneSafetyPatches();
+    installPlayerSceneOptimizerMonitor();
+    // 11) Start periodic version checks.
     checkForkVersionAndRefresh();
     versionRefreshIntervalId = w.setInterval(checkForkVersionAndRefresh, VERSION_REFRESH_MIN_INTERVAL_MS);
     // 12) Restore app token from persisted storage (legacy key fallback included).
