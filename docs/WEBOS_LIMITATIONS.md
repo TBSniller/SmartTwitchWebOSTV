@@ -94,7 +94,7 @@ Status: **Intentionally retained**
 Reason:
 - Stable wrapper defaults are coupled to `/release/index.html`.
 - Dev prerelease wrapper defaults are coupled to `/dev/index.html`.
-- Pages deployment composes both channels in one artifact (`/release` from `master`, `/dev` from `dev/pages-publish`).
+- Pages deployment composes both channels in one artifact (`/release` from `master`, `/dev` from `dev/publish-pages`).
 
 Impact:
 - Removing or renaming hosted channels requires a dedicated migration refactor across wrapper defaults and CI workflows.

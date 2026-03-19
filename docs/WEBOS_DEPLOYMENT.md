@@ -57,20 +57,20 @@ Workflow: `.github/workflows/release.yml`
 ## GitHub Pages Deployment
 
 Workflow: `.github/workflows/deploy-pages.yml`
-- Trigger: push to `master` or `dev/pages-publish` + manual dispatch
+- Trigger: push to `master` or `dev/publish-pages` + manual dispatch
 - Behavior:
   1. check out `origin/master` and stage `/release` via `node tools/upstream/prepareHostedRelease.js --out-dir .pages --channel release`
-  2. check out `origin/dev/pages-publish` and stage `/dev` via `node tools/upstream/prepareHostedRelease.js --out-dir .pages --channel dev`
+  2. if `origin/dev/publish-pages` exists, stage `/dev` from that branch; otherwise fallback to `origin/master` for `/dev`
   3. upload `.pages` artifact
   4. deploy via Pages Actions
 - Channel contract:
   - Stable hosted app remains `/release/index.html` from `master`
-  - Dev hosted app is `/dev/index.html` from `dev/pages-publish`
+  - Dev hosted app is `/dev/index.html` from `dev/publish-pages`
 
 ## Dev Prerelease Automation
 
 Workflow: `.github/workflows/release-dev-prerelease.yml`
-- Trigger: manual dispatch from branch `dev/pages-publish`
+- Trigger: manual dispatch from branch `dev/publish-pages`
 - Behavior:
   1. discover next global prerelease tag (`dev-N`) from existing tags
   2. run `npm ci`, `npm run hosted:prepare`, and `npm run lint`

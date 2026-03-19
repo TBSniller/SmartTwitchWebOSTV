@@ -31,12 +31,12 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - name: Ensure workflow is run from dev/pages-publish
+      - name: Ensure workflow is run from dev publish branch
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_NAME}" != "dev/pages-publish" ]]; then
-            echo "This workflow must run from dev/pages-publish. Got: ${GITHUB_REF_NAME}" >&2
+          if [[ "${GITHUB_REF_NAME}" != "dev/publish-pages" ]]; then
+            echo "This workflow must run from dev/publish-pages. Got: ${GITHUB_REF_NAME}" >&2
             exit 1
           fi
 
@@ -103,7 +103,7 @@ jobs:
           allowUpdates: false
           omitBodyDuringUpdate: true
           body: |
-            Automated dev prerelease from `dev/pages-publish`.
+            Automated dev prerelease from `${{ github.ref_name }}`.
 
             - Prerelease tag: `${{ steps.version.outputs.dev_tag }}`
             - Hosted app channel: `https://tbsniller.github.io/SmartTwitchWebOSTV/dev/index.html`
