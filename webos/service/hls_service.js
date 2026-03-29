@@ -18,6 +18,8 @@ var MAX_RESPONSE_BYTES = 1024 * 1024;
 var DEFAULT_TIMEOUT_MS = 4500;
 var MIN_TIMEOUT_MS = 1200;
 var MAX_TIMEOUT_MS = 7000;
+var DEFAULT_BROWSER_UA = 'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36';
+var DEFAULT_ACCEPT_LANGUAGE = 'en-US,en;q=0.9';
 
 function clampTimeout(value) {
     var parsed = parseInt(value, 10);
@@ -46,6 +48,13 @@ function respondError(message, statusCode, errorCode, errorText) {
         errorText: errorText || 'Service error'
     });
 }
+function normalizeHeaderValue(value, maxLength) {
+    if (typeof value !== 'string') return '';
+    var cleaned = value.replace(/[\r\n]/g, ' ').trim();
+    if (!cleaned) return '';
+    if (maxLength > 0 && cleaned.length > maxLength) return cleaned.slice(0, maxLength);
+    return cleaned;
+}
 
 service.register('fetchPlaylist', function (message) {
     var payload = message && message.payload && typeof message.payload === 'object' ? message.payload : {};
@@ -73,6 +82,10 @@ service.register('fetchPlaylist', function (message) {
     }
 
     var timeoutMs = clampTimeout(payload.timeoutMs);
+    var requestOrigin = normalizeHeaderValue(payload.origin, 256);
+    var requestReferer = normalizeHeaderValue(payload.referer, 1024);
+    var requestUserAgent = normalizeHeaderValue(payload.userAgent, 512) || DEFAULT_BROWSER_UA;
+    var requestAcceptLanguage = normalizeHeaderValue(payload.acceptLanguage, 256) || DEFAULT_ACCEPT_LANGUAGE;
     var finished = false;
 
     var finalize = function (result) {
@@ -80,6 +93,16 @@ service.register('fetchPlaylist', function (message) {
         finished = true;
         message.respond(result);
     };
+    var requestHeaders = {
+        Accept: '*/*',
+        'Accept-Encoding': 'identity',
+        'Accept-Language': requestAcceptLanguage,
+        'User-Agent': requestUserAgent
+    };
+    if (requestOrigin) requestHeaders.Origin = requestOrigin;
+    if (requestReferer) requestHeaders.Referer = requestReferer;
+    requestHeaders['Sec-Fetch-Mode'] = 'cors';
+    requestHeaders['Sec-Fetch-Site'] = 'cross-site';
 
     var req = https.request(
         {
@@ -88,12 +111,7 @@ service.register('fetchPlaylist', function (message) {
             port: parsedUrl.port ? parsedUrl.port : 443,
             method: 'GET',
             path: parsedUrl.pathname + (parsedUrl.search || ''),
-            headers: {
-                Accept: 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.8',
-                'Accept-Encoding': 'identity',
-                Connection: 'keep-alive',
-                'User-Agent': 'SmartTwitchWebOSTV-HLSService/1.0'
-            }
+            headers: requestHeaders
         },
         function (res) {
             var status = parseInt(res.statusCode, 10) || 0;

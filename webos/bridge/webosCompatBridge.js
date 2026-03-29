@@ -2608,6 +2608,26 @@
         var bridge = null;
         var timerId = 0;
         var settled = false;
+        var requestOrigin = '';
+        var requestReferer = '';
+        var requestUserAgent = '';
+        var requestAcceptLanguage = '';
+        try {
+            if (w.location && typeof w.location.origin === 'string' && /^https?:\/\//i.test(w.location.origin)) {
+                requestOrigin = w.location.origin;
+                requestReferer = requestOrigin + '/';
+            } else if (w.location && typeof w.location.href === 'string' && /^https?:\/\//i.test(w.location.href)) {
+                requestReferer = w.location.href;
+            }
+            if (w.navigator && typeof w.navigator.userAgent === 'string') requestUserAgent = w.navigator.userAgent;
+            if (w.navigator) {
+                if (Array.isArray(w.navigator.languages) && w.navigator.languages.length) {
+                    requestAcceptLanguage = w.navigator.languages.join(',');
+                } else if (typeof w.navigator.language === 'string' && w.navigator.language) {
+                    requestAcceptLanguage = w.navigator.language;
+                }
+            }
+        } catch (eLoc) {}
         var safeFinish = function (result, reason) {
             if (settled) return;
             settled = true;
@@ -2635,7 +2655,12 @@
                 safeFinish(normalized, 'service_ok');
                 return;
             }
-            safeFinish(null, 'service_bad_payload');
+            var reason = 'service_bad_payload';
+            if (parsed && typeof parsed === 'object') {
+                if (parsed.errorCode) reason = 'service_error_' + String(parsed.errorCode).toLowerCase();
+                else if (parsed.status) reason = 'service_status_' + String(parsed.status);
+            }
+            safeFinish(null, reason);
         };
         timerId = w.setTimeout(function () {
             safeFinish(null, 'service_timeout');
@@ -2643,7 +2668,11 @@
         try {
             bridge.call('luna://' + serviceName + '/fetchPlaylist', JSON.stringify({
                 url: requestUrl,
-                timeoutMs: getUsherPlaylistServiceTimeoutMs(timeoutMs)
+                timeoutMs: getUsherPlaylistServiceTimeoutMs(timeoutMs),
+                origin: requestOrigin || '',
+                referer: requestReferer || '',
+                userAgent: requestUserAgent || '',
+                acceptLanguage: requestAcceptLanguage || ''
             }));
         } catch (eCall) {
             safeFinish(null, 'service_call_exception');
@@ -2685,6 +2714,12 @@
             startedAt: Date.now()
         };
         callUsherPlaylistService(meta, timeoutMs, function (result, reason) {
+            bridgeDebugLog('usher_hls_service_result', {
+                reason: reason || '',
+                status: result && result.status ? result.status : 0,
+                hasPlaylist: !!(result && hasUsablePlaylistBody(result.responseText || '')),
+                url: meta && meta.url ? meta.url : ''
+            });
             if (result && result.status === 200 && hasUsablePlaylistBody(result.responseText)) {
                 cacheUsherPlaylistResult(meta.requestKey, result.responseText, result.url || meta.url || '');
                 cacheNetworkResponse(meta.requestKey, result.status, result.responseText);
