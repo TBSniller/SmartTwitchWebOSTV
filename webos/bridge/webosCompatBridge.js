@@ -238,6 +238,13 @@
     var NETWORK_RTT_HOST_MAX = 64;                     // Max tracked RTT hosts.
     var NETWORK_PROBE_HOST_MAX = 32;                   // Max tracked probe hosts.
     var NETWORK_CIRCUIT_HOST_MAX = 48;                 // Max tracked circuit-breaker hosts.
+    var USHER_PLAYLIST_SERVICE_ID_SUFFIX = '.hls';     // Local JS service suffix appended to app id.
+    var USHER_PLAYLIST_SERVICE_TIMEOUT_MS = 4500;      // Timeout for local service playlist fetch.
+    var USHER_PLAYLIST_SERVICE_TIMEOUT_MIN_MS = 1200;  // Min allowed timeout sent to local service.
+    var USHER_PLAYLIST_SERVICE_TIMEOUT_MAX_MS = 7000;  // Max allowed timeout sent to local service.
+    var USHER_PLAYLIST_CACHE_TTL_MS = 45000;           // In-memory TTL for service-fetched playlists.
+    var USHER_PLAYLIST_CACHE_MAX = 24;                 // Max cached service playlist entries.
+    var USHER_PLAYLIST_INFLIGHT_MAX_AGE_MS = 20000;    // Safety prune age for stale in-flight entries.
     var PREVIEW_SET_COOLDOWN_MS = 450;                 // Dedup cooldown for repeated setPrev calls.
     var LIFECYCLE_STOP_MIN_HIDDEN_MS = 12000;          // Min hidden time before stopping playback.
     var STALL_PROGRESS_THRESHOLD_MS = 4000;            // No-progress window before stall is considered persistent.
@@ -256,6 +263,9 @@
     var networkResponseCacheByKey = {};       // Cached sync XHR responses by request key.
     var networkRttGlobalAvgMs = 0;            // Global average RTT across all hosts.
     var networkPruneLastAt = 0;               // Last network state prune timestamp.
+    var usherPlaylistCacheByKey = {};         // Short-TTL in-memory playlist cache (service path).
+    var usherPlaylistInFlightByKey = {};      // In-flight service fetch callbacks by request key.
+    var usherPlaylistCorsFailureSeen = false; // Session flag: if true, skip doomed browser XHR on usher playlist.
     // --- Loading indicator debounce ---
     // Loader show is delayed by DEBOUNCE_MS to prevent flicker on fast loads.
     // Loader hide is always immediate (canplay/playing/loadeddata events).
@@ -355,6 +365,19 @@
         } catch (e2) {
             return false;
         }
+    }
+    function isForceHlsServiceFetchEnabled() {
+        try {
+            if (w.location && typeof w.location.search === 'string' && /(?:\?|&)sttv_debug_force_hls_service_fetch=1(?:&|$)/i.test(w.location.search)) {
+                return true;
+            }
+        } catch (e0) {}
+        try {
+            if (!w.localStorage) return false;
+            var value = w.localStorage.getItem('STTV_DEBUG_FORCE_HLS_SERVICE_FETCH');
+            if (value === '1' || value === 'true' || value === 'TRUE') return true;
+        } catch (e1) {}
+        return false;
     }
     function bridgeDebugLog(event, extra) {
         if (!BRIDGE_DEBUG_ENABLED) return;
@@ -2482,19 +2505,22 @@
     function hasUsablePlaylistBody(text) {
         return typeof text === 'string' && text.indexOf('#EXTM3U') !== -1;
     }
-    function isUsherLiveHlsPath(pathLower) {
+    function isUsherPlaylistPath(pathLower) {
         if (!pathLower) return false;
         var normalizedPath = String(pathLower).toLowerCase().split('?')[0];
-        return /\/api\/channel\/hls\/[^\/\?]+\.m3u8$/.test(normalizedPath);
+        if (!/\.m3u8$/.test(normalizedPath)) return false;
+        if (normalizedPath.indexOf('/api/channel/hls/') === 0) return true;
+        if (normalizedPath.indexOf('/vod/') === 0) return true;
+        return false;
     }
-    function isUsherLivePlaylistRequest(meta) {
+    function isUsherPlaylistRequest(meta) {
         if (!meta) return false;
         if (meta.host !== 'usher.ttvnw.net') return false;
-        if (!isUsherLiveHlsPath(meta.pathLower || '')) return false;
+        if (!isUsherPlaylistPath(meta.pathLower || '')) return false;
         return String(meta.method || 'GET').toUpperCase() === 'GET';
     }
     function shouldUseUsherPlaylistCorsFallback(meta, status, text, reason) {
-        if (!isUsherLivePlaylistRequest(meta)) return false;
+        if (!isUsherPlaylistRequest(meta)) return false;
         var st = parseInt(status, 10) || 0;
         if (st > 0) return false;
         if (hasUsablePlaylistBody(text)) return false;
@@ -2515,6 +2541,156 @@
             url: fallbackUrl,
             synthetic: true
         };
+    }
+    function getWebOsAppId() {
+        try {
+            if (w.PalmSystem && w.PalmSystem.identifier) {
+                return String(w.PalmSystem.identifier).split(' ')[0] || '';
+            }
+        } catch (e) {}
+        return '';
+    }
+    function getUsherPlaylistServiceName() {
+        var appId = getWebOsAppId();
+        if (!appId) return '';
+        return appId + USHER_PLAYLIST_SERVICE_ID_SUFFIX;
+    }
+    function getUsherPlaylistServiceTimeoutMs(timeoutHint) {
+        var parsed = parseInt(timeoutHint, 10);
+        if (!isFinite(parsed) || parsed <= 0) parsed = USHER_PLAYLIST_SERVICE_TIMEOUT_MS;
+        return clamp(parsed, USHER_PLAYLIST_SERVICE_TIMEOUT_MIN_MS, USHER_PLAYLIST_SERVICE_TIMEOUT_MAX_MS);
+    }
+    function getUsherPlaylistCacheEntry(requestKey) {
+        if (!requestKey) return null;
+        var entry = usherPlaylistCacheByKey[requestKey];
+        if (!entry) return null;
+        var savedAt = parseInt(entry.savedAt, 10) || 0;
+        if (!savedAt || Date.now() - savedAt > USHER_PLAYLIST_CACHE_TTL_MS) {
+            delete usherPlaylistCacheByKey[requestKey];
+            return null;
+        }
+        return entry;
+    }
+    function cacheUsherPlaylistResult(requestKey, responseText, responseUrl) {
+        if (!requestKey || !hasUsablePlaylistBody(responseText)) return;
+        usherPlaylistCacheByKey[requestKey] = {
+            status: 200,
+            responseText: responseText,
+            responseUrl: responseUrl || '',
+            savedAt: Date.now()
+        };
+        pruneOldestMapEntries(usherPlaylistCacheByKey, USHER_PLAYLIST_CACHE_MAX);
+    }
+    function normalizeServicePlaylistResult(rawResult, meta) {
+        var payload = rawResult && typeof rawResult === 'object' ? rawResult : {};
+        var st = parseInt(payload.status, 10) || 0;
+        var text = typeof payload.responseText === 'string' ? payload.responseText : '';
+        if (st !== 200 || !hasUsablePlaylistBody(text)) return null;
+        var url = typeof payload.url === 'string' && payload.url ? payload.url : meta && meta.url ? meta.url : '';
+        return {
+            status: 200,
+            responseText: text,
+            url: url
+        };
+    }
+    function callUsherPlaylistService(meta, timeoutMs, done) {
+        var finish = typeof done === 'function' ? done : function () {};
+        var serviceName = getUsherPlaylistServiceName();
+        if (!serviceName || typeof w.PalmServiceBridge !== 'function') {
+            finish(null, 'service_unavailable');
+            return;
+        }
+        var requestUrl = meta && meta.url ? String(meta.url) : '';
+        if (!requestUrl) {
+            finish(null, 'missing_url');
+            return;
+        }
+        var bridge = null;
+        var timerId = 0;
+        var settled = false;
+        var safeFinish = function (result, reason) {
+            if (settled) return;
+            settled = true;
+            if (timerId) {
+                try { w.clearTimeout(timerId); } catch (eClear) {}
+                timerId = 0;
+            }
+            if (bridge) {
+                try { bridge.onservicecallback = null; } catch (eCb) {}
+                try { bridge.cancel(); } catch (eCancel) {}
+            }
+            bridge = null;
+            finish(result, reason || '');
+        };
+        try {
+            bridge = new w.PalmServiceBridge();
+        } catch (eBridge) {
+            safeFinish(null, 'service_bridge_create_fail');
+            return;
+        }
+        bridge.onservicecallback = function (msg) {
+            var parsed = safeParse(msg, null);
+            var normalized = normalizeServicePlaylistResult(parsed, meta);
+            if (normalized) {
+                safeFinish(normalized, 'service_ok');
+                return;
+            }
+            safeFinish(null, 'service_bad_payload');
+        };
+        timerId = w.setTimeout(function () {
+            safeFinish(null, 'service_timeout');
+        }, getUsherPlaylistServiceTimeoutMs(timeoutMs) + 150);
+        try {
+            bridge.call('luna://' + serviceName + '/fetchPlaylist', JSON.stringify({
+                url: requestUrl,
+                timeoutMs: getUsherPlaylistServiceTimeoutMs(timeoutMs)
+            }));
+        } catch (eCall) {
+            safeFinish(null, 'service_call_exception');
+        }
+    }
+    function flushUsherPlaylistInFlight(requestKey, result, reason) {
+        var inFlight = usherPlaylistInFlightByKey[requestKey];
+        if (!inFlight) return;
+        delete usherPlaylistInFlightByKey[requestKey];
+        var callbacks = inFlight.callbacks || [];
+        var i;
+        for (i = 0; i < callbacks.length; i++) {
+            try {
+                callbacks[i](result, reason || '');
+            } catch (eCb) {}
+        }
+    }
+    function requestUsherPlaylistViaService(meta, timeoutMs, done) {
+        var callback = typeof done === 'function' ? done : function () {};
+        if (!isUsherPlaylistRequest(meta) || !meta.requestKey) {
+            callback(null, 'not_usher_playlist');
+            return;
+        }
+        var cached = getUsherPlaylistCacheEntry(meta.requestKey);
+        if (cached) {
+            callback({
+                status: cached.status || 200,
+                responseText: cached.responseText || '',
+                url: cached.responseUrl || meta.url || ''
+            }, 'cache_hit');
+            return;
+        }
+        if (usherPlaylistInFlightByKey[meta.requestKey]) {
+            usherPlaylistInFlightByKey[meta.requestKey].callbacks.push(callback);
+            return;
+        }
+        usherPlaylistInFlightByKey[meta.requestKey] = {
+            callbacks: [callback],
+            startedAt: Date.now()
+        };
+        callUsherPlaylistService(meta, timeoutMs, function (result, reason) {
+            if (result && result.status === 200 && hasUsablePlaylistBody(result.responseText)) {
+                cacheUsherPlaylistResult(meta.requestKey, result.responseText, result.url || meta.url || '');
+                cacheNetworkResponse(meta.requestKey, result.status, result.responseText);
+            }
+            flushUsherPlaylistInFlight(meta.requestKey, result, reason);
+        });
     }
     function getEffectiveTimeoutMs(timeout, meta, sync) {
         var defaultCap = sync ? NETWORK_SYNC_MAX_TIMEOUT_MS : NETWORK_MAX_TIMEOUT_MS;
@@ -2565,7 +2741,22 @@
             var savedAt = entry && entry.savedAt ? parseInt(entry.savedAt, 10) || 0 : 0;
             if (!savedAt || now - savedAt > NETWORK_SYNC_CACHE_STALE_MAX_MS) delete networkResponseCacheByKey[key];
         }
+        for (key in usherPlaylistInFlightByKey) {
+            if (!Object.prototype.hasOwnProperty.call(usherPlaylistInFlightByKey, key)) continue;
+            var playlistInFlight = usherPlaylistInFlightByKey[key];
+            var playlistStartedAt = playlistInFlight && playlistInFlight.startedAt ? parseInt(playlistInFlight.startedAt, 10) || 0 : 0;
+            if (!playlistStartedAt || now - playlistStartedAt > USHER_PLAYLIST_INFLIGHT_MAX_AGE_MS) {
+                flushUsherPlaylistInFlight(key, null, 'pruned');
+            }
+        }
+        for (key in usherPlaylistCacheByKey) {
+            if (!Object.prototype.hasOwnProperty.call(usherPlaylistCacheByKey, key)) continue;
+            var playlistEntry = usherPlaylistCacheByKey[key];
+            var playlistSavedAt = playlistEntry && playlistEntry.savedAt ? parseInt(playlistEntry.savedAt, 10) || 0 : 0;
+            if (!playlistSavedAt || now - playlistSavedAt > USHER_PLAYLIST_CACHE_TTL_MS) delete usherPlaylistCacheByKey[key];
+        }
         pruneOldestMapEntries(networkResponseCacheByKey, NETWORK_RESPONSE_CACHE_MAX);
+        pruneOldestMapEntries(usherPlaylistCacheByKey, USHER_PLAYLIST_CACHE_MAX);
         pruneOldestMapEntries(networkRttByHost, NETWORK_RTT_HOST_MAX);
         pruneOldestMapEntries(networkMediaProbeByHost, NETWORK_PROBE_HOST_MAX);
         pruneOldestMapEntries(networkCircuitByHost, NETWORK_CIRCUIT_HOST_MAX);
@@ -2813,22 +3004,37 @@
         var body = req.body;
         var callback = typeof cb === 'function' ? cb : function () {};
         var meta = buildNetworkRequestMeta(u, method, body);
+        var forceServiceFetch = isForceHlsServiceFetchEnabled();
         maybePruneNetworkState();
         var effectiveTimeout = getEffectiveTimeoutMs(to, meta);
         var requestStartedAt = Date.now();
         var x;
         var done = false;
-        var finish = function (status, text, reason) {
+        var serviceAttempted = false;
+        var finish = function (status, text, reason, responseUrl, synthetic, skipServiceAttempt) {
             if (done) return;
+            if (!skipServiceAttempt && !serviceAttempted && shouldUseUsherPlaylistCorsFallback(meta, status, text, reason)) {
+                serviceAttempted = true;
+                usherPlaylistCorsFailureSeen = true;
+                bridgeDebugLog('usher_hls_cors_session_detected', {
+                    reason: reason || 'unknown',
+                    url: meta && meta.url ? meta.url : ''
+                });
+                requestUsherPlaylistViaService(meta, effectiveTimeout, function (serviceResult, serviceReason) {
+                    if (serviceResult && serviceResult.status === 200 && hasUsablePlaylistBody(serviceResult.responseText)) {
+                        finish(serviceResult.status, serviceResult.responseText, 'service_success', serviceResult.url || meta.url || '', true, true);
+                        return;
+                    }
+                    var fallback = buildUsherPlaylistCorsFallbackResult(meta, 0, serviceReason || reason || 'service_unavailable');
+                    finish(fallback.status, fallback.responseText, 'cors_fallback_synthetic', fallback.url, true, true);
+                });
+                return;
+            }
             done = true;
             if (meta.dedupeEnabled && meta.requestKey) clearInFlightRequestByKey(meta.requestKey, x);
-            var fallback = shouldUseUsherPlaylistCorsFallback(meta, status, text, reason)
-                ? buildUsherPlaylistCorsFallbackResult(meta, 0, reason)
-                : null;
-            var synthetic = !!(fallback && fallback.synthetic);
-            var finalStatus = fallback ? fallback.status : status || 0;
-            var finalText = fallback ? fallback.responseText : text || '';
-            var finalUrl = fallback && fallback.url ? fallback.url : '';
+            var finalStatus = status || 0;
+            var finalText = text || '';
+            var finalUrl = responseUrl || '';
             if (!synthetic) {
                 if (finalStatus > 0) {
                     cacheNetworkResponse(meta.requestKey, finalStatus, finalText);
@@ -2852,6 +3058,22 @@
             x = null;
             if (callbackRef) callbackRef(finalStatus, finalText, finalUrl);
         };
+        if (isUsherPlaylistRequest(meta) && (usherPlaylistCorsFailureSeen || forceServiceFetch)) {
+            if (forceServiceFetch) {
+                bridgeDebugLog('usher_hls_service_forced', {
+                    url: meta && meta.url ? meta.url : ''
+                });
+            }
+            requestUsherPlaylistViaService(meta, effectiveTimeout, function (serviceResult, serviceReason) {
+                if (serviceResult && serviceResult.status === 200 && hasUsablePlaylistBody(serviceResult.responseText)) {
+                    finish(serviceResult.status, serviceResult.responseText, 'service_success', serviceResult.url || meta.url || '', true, true);
+                    return;
+                }
+                var fallback = buildUsherPlaylistCorsFallbackResult(meta, 0, serviceReason || 'service_unavailable');
+                finish(fallback.status, fallback.responseText, 'service_fail_synthetic', fallback.url, true, true);
+            });
+            return;
+        }
         if (meta.circuitEnabled && isCircuitOpenForHost(meta.host)) {
             finish(0, '', 'circuit_open');
             return;
@@ -2883,6 +3105,7 @@
         var method = req.method;
         var body = req.body;
         var meta = buildNetworkRequestMeta(u, method, body);
+        var forceServiceFetch = isForceHlsServiceFetchEnabled();
         maybePruneNetworkState();
         var effectiveTimeout = getEffectiveTimeoutMs(to, meta, sync);
         // Stale-while-revalidate: for sync requests, serve cached data immediately
@@ -2894,6 +3117,24 @@
                 if (cached.isStale) sendAsyncRequest(u, to, pm, m, h, function () {});
                 return {status: cached.status, responseText: cached.responseText, checkResult: ck || 0};
             }
+        }
+        if (sync && isUsherPlaylistRequest(meta) && (usherPlaylistCorsFailureSeen || forceServiceFetch)) {
+            if (forceServiceFetch) {
+                bridgeDebugLog('usher_hls_service_forced_sync', {
+                    url: meta && meta.url ? meta.url : ''
+                });
+            }
+            var cachedUsherPlaylist = getUsherPlaylistCacheEntry(meta.requestKey);
+            if (cachedUsherPlaylist && hasUsablePlaylistBody(cachedUsherPlaylist.responseText || '')) {
+                return {
+                    status: 200,
+                    responseText: cachedUsherPlaylist.responseText,
+                    checkResult: ck || 0,
+                    url: cachedUsherPlaylist.responseUrl || meta.url || ''
+                };
+            }
+            requestUsherPlaylistViaService(meta, effectiveTimeout, function () {});
+            return buildUsherPlaylistCorsFallbackResult(meta, ck, 'service_deferred_sync');
         }
         if (meta.circuitEnabled && isCircuitOpenForHost(meta.host)) {
             if (sync) {
@@ -2932,6 +3173,8 @@
             } catch (e2) {
                 if (sync) {
                     if (shouldUseUsherPlaylistCorsFallback(meta, 0, '', 'request_exception')) {
+                        usherPlaylistCorsFailureSeen = true;
+                        requestUsherPlaylistViaService(meta, effectiveTimeout, function () {});
                         return buildUsherPlaylistCorsFallbackResult(meta, ck, 'request_exception');
                     }
                     if (meta.circuitEnabled) recordHostCircuitFailure(meta.host);
@@ -2944,6 +3187,8 @@
                 var syncStatus = x.status || 0;
                 var syncText = x.responseText || '';
                 if (shouldUseUsherPlaylistCorsFallback(meta, syncStatus, syncText, syncStatus > 0 ? 'success' : 'status0')) {
+                    usherPlaylistCorsFailureSeen = true;
+                    requestUsherPlaylistViaService(meta, effectiveTimeout, function () {});
                     return buildUsherPlaylistCorsFallbackResult(meta, ck, 'status0_sync');
                 }
                 if (syncStatus > 0) {

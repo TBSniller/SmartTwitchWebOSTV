@@ -7,7 +7,7 @@
     "sync:upstream:release": "node tools/upstream/syncUpstreamRelease.js",
     "sync:upstream:android-context": "node tools/upstream/syncUpstreamAndroidContext.js",
     "sync:upstream:all": "npm run sync:upstream:release && npm run sync:upstream:android-context",
-    "webos:package": "ares-package webos/app -o build/",
+    "webos:package": "ares-package webos/app webos/service -o build/",
     "webos:install": "node tools/webos/runAresCommand.js install",
     "webos:launch": "node tools/webos/runAresCommand.js launch",
     "webos:inspect": "node tools/webos/runAresCommand.js inspect",

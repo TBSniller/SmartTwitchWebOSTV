@@ -1,0 +1,10 @@
+{
+  "id": "com.tbsniller.smarttwitchwebostv.hls",
+  "description": "SmartTwitchTV local HLS playlist service",
+  "services": [
+    {
+      "name": "com.tbsniller.smarttwitchwebostv.hls",
+      "description": "Fetches Twitch master playlists outside browser CORS limits"
+    }
+  ]
+}

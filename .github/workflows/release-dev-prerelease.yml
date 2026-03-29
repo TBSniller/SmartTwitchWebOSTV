@@ -73,8 +73,14 @@ jobs:
             --dev-number "${{ steps.version.outputs.dev_number }}" \
             --target-url "https://tbsniller.github.io/SmartTwitchWebOSTV/dev/index.html"
 
+      - name: Prepare dev service variant
+        run: |
+          node tools/release/prepareDevServiceVariant.js \
+            --out-dir .tmp/dev-service \
+            --dev-appinfo .tmp/dev-app/appinfo.json
+
       - name: Build dev webOS package
-        run: npx ares-package .tmp/dev-app -o build/
+        run: npx ares-package .tmp/dev-app .tmp/dev-service -o build/
 
       - name: Generate prerelease manifest
         run: |
