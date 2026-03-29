@@ -4,7 +4,15 @@
   "services": [
     {
       "name": "com.tbsniller.smarttwitchwebostv.hls",
-      "description": "Fetches Twitch master playlists outside browser CORS limits"
+      "description": "Fetches Twitch master playlists outside browser CORS limits",
+      "commands": [
+        {
+          "name": "fetchPlaylist",
+          "description": "Fetch an usher playlist and return its M3U8 body",
+          "public": true
+        }
+      ]
     }
-  ]
+  ],
+  "version": "1.0.0"
 }
