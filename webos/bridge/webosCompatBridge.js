@@ -2306,6 +2306,15 @@
             show(mv);
             try { mv.load(); } catch (e) {}
         }
+        // Align with Android PlayerActivity.onTracksChanged: refresh quality list
+        // for main player (live/vod) when not in PiP/multistream mode.
+        if (ms.type < 3 && !w.PlayExtra_PicturePicture && !w.Play_MultiEnable) {
+            call('Play_getQualities', [ms.type, false]);
+            bridgeDebugLog('main_quality_refresh_requested', {
+                type: ms.type,
+                parsedCount: ms.q.length
+            });
+        }
     }
     // Starts preview/feed playback. Deduplicates rapid repeated calls.
     // Rejects multi/extra/feed/side/screens modes when main is active (hardware limit).
@@ -4215,7 +4224,15 @@
             });
         };
         // IMPLEMENTED: Returns available quality options as JSON array.
-        A.getQualities = function () { var arr = [{id: 'Auto'}], i; for (i = 0; i < ms.q.length; i++) arr.push({id: ms.q[i].id}); return JSON.stringify(arr); };
+        A.getQualities = function () {
+            var arr = [{id: 'Auto'}], i;
+            for (i = 0; i < ms.q.length; i++) arr.push({id: ms.q[i].id});
+            bridgeDebugLog('get_qualities_called', {
+                count: arr.length,
+                ids: arr.map(function (item) { return item && item.id ? item.id : ''; }).slice(0, 8)
+            });
+            return JSON.stringify(arr);
+        };
         // IMPLEMENTED: Sets max resolution cap for main player.
         A.SetMainPlayerBitrate = function (bitrate, resolution) {
             void bitrate;
