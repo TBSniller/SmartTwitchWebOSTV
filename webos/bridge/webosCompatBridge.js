@@ -725,8 +725,10 @@
         }
     }
     // Builds a JSON response string matching the Android sync XHR return format.
-    function res(st, tx, ck) {
-        return JSON.stringify({status: st || 0, responseText: tx || '', checkResult: ck || 0});
+    function res(st, tx, ck, u) {
+        var out = {status: st || 0, responseText: tx || '', checkResult: ck || 0};
+        if (typeof u === 'string' && u) out.url = u;
+        return JSON.stringify(out);
     }
     // =========================================================================
     // Key Dispatch
@@ -2448,6 +2450,7 @@
         var meta = safeParseRequestMeta(rawUrl);
         var host = meta.host;
         var pathLower = meta.pathLower;
+        var normalizedMethod = String(method || 'GET').toUpperCase();
         var key = '';
         var gqlHost = host.indexOf('gql.twitch.tv') !== -1 || pathLower === '/gql';
         var hlsId = extractHlsId(pathLower);
@@ -2467,10 +2470,50 @@
         }
         return {
             host: host,
+            url: meta.url || '',
+            pathLower: pathLower,
+            method: normalizedMethod,
             highRisk: isHighRiskHost(host),
             requestKey: key,
             circuitEnabled: !isCircuitExcludedHost(host, pathLower),
             dedupeEnabled: !isCoreTwitchHost(host)
+        };
+    }
+    function hasUsablePlaylistBody(text) {
+        return typeof text === 'string' && text.indexOf('#EXTM3U') !== -1;
+    }
+    function isUsherLiveHlsPath(pathLower) {
+        if (!pathLower) return false;
+        var normalizedPath = String(pathLower).toLowerCase().split('?')[0];
+        return /\/api\/channel\/hls\/[^\/\?]+\.m3u8$/.test(normalizedPath);
+    }
+    function isUsherLivePlaylistRequest(meta) {
+        if (!meta) return false;
+        if (meta.host !== 'usher.ttvnw.net') return false;
+        if (!isUsherLiveHlsPath(meta.pathLower || '')) return false;
+        return String(meta.method || 'GET').toUpperCase() === 'GET';
+    }
+    function shouldUseUsherPlaylistCorsFallback(meta, status, text, reason) {
+        if (!isUsherLivePlaylistRequest(meta)) return false;
+        var st = parseInt(status, 10) || 0;
+        if (st > 0) return false;
+        if (hasUsablePlaylistBody(text)) return false;
+        if (reason === 'timeout' || reason === 'abort' || reason === 'dedupe_abort' || reason === 'circuit_open') return false;
+        return true;
+    }
+    function buildUsherPlaylistCorsFallbackResult(meta, checkResult, reason) {
+        var fallbackUrl = meta && typeof meta.url === 'string' ? meta.url : '';
+        bridgeDebugLog('usher_hls_cors_fallback', {
+            reason: reason || 'unknown',
+            host: meta && meta.host ? meta.host : '',
+            url: fallbackUrl
+        });
+        return {
+            status: 200,
+            responseText: '',
+            checkResult: checkResult || 0,
+            url: fallbackUrl,
+            synthetic: true
         };
     }
     function getEffectiveTimeoutMs(timeout, meta, sync) {
@@ -2761,7 +2804,7 @@
         if (family && networkRttGlobalAvgMs > 0) return networkRttGlobalAvgMs;
         return 0;
     }
-    // Sends an async XHR request and invokes callback with (status, responseText, checkArgs...).
+    // Sends an async XHR request and invokes callback with (status, responseText, responseUrl).
     // Android: Android.XmlHttpGetFull() / Android.BasexmlHttpGet() via OkHttp.
     // webOS:   XHR with timeout, circuit-breaker, dedupe, and response caching.
     function sendAsyncRequest(u, to, pm, m, h, cb) {
@@ -2779,16 +2822,23 @@
             if (done) return;
             done = true;
             if (meta.dedupeEnabled && meta.requestKey) clearInFlightRequestByKey(meta.requestKey, x);
-            if (status > 0) {
-                cacheNetworkResponse(meta.requestKey, status, text);
-                recordNetworkRtt(meta.host, Date.now() - requestStartedAt);
-                if (meta.circuitEnabled) recordHostCircuitSuccess(meta.host);
-            } else if (meta.circuitEnabled && reason !== 'dedupe_abort' && reason !== 'circuit_open') {
-                recordHostCircuitFailure(meta.host);
+            var fallback = shouldUseUsherPlaylistCorsFallback(meta, status, text, reason)
+                ? buildUsherPlaylistCorsFallbackResult(meta, 0, reason)
+                : null;
+            var synthetic = !!(fallback && fallback.synthetic);
+            var finalStatus = fallback ? fallback.status : status || 0;
+            var finalText = fallback ? fallback.responseText : text || '';
+            var finalUrl = fallback && fallback.url ? fallback.url : '';
+            if (!synthetic) {
+                if (finalStatus > 0) {
+                    cacheNetworkResponse(meta.requestKey, finalStatus, finalText);
+                    recordNetworkRtt(meta.host, Date.now() - requestStartedAt);
+                    if (meta.circuitEnabled) recordHostCircuitSuccess(meta.host);
+                } else if (meta.circuitEnabled && reason !== 'dedupe_abort' && reason !== 'circuit_open') {
+                    recordHostCircuitFailure(meta.host);
+                }
             }
             var callbackRef = callback;
-            var finalStatus = status || 0;
-            var finalText = text || '';
             // Break XHR event handler retain cycles.
             if (x) {
                 try {
@@ -2800,7 +2850,7 @@
             }
             callback = null;
             x = null;
-            if (callbackRef) callbackRef(finalStatus, finalText);
+            if (callbackRef) callbackRef(finalStatus, finalText, finalUrl);
         };
         if (meta.circuitEnabled && isCircuitOpenForHost(meta.host)) {
             finish(0, '', 'circuit_open');
@@ -2881,6 +2931,9 @@
                 x.send(body ? body : null);
             } catch (e2) {
                 if (sync) {
+                    if (shouldUseUsherPlaylistCorsFallback(meta, 0, '', 'request_exception')) {
+                        return buildUsherPlaylistCorsFallbackResult(meta, ck, 'request_exception');
+                    }
                     if (meta.circuitEnabled) recordHostCircuitFailure(meta.host);
                     return {status: 0, responseText: '', checkResult: ck || 0};
                 } else if (meta.dedupeEnabled) {
@@ -2888,12 +2941,17 @@
                 }
             }
             if (sync) {
-                if ((x.status || 0) > 0) {
-                    cacheNetworkResponse(meta.requestKey, x.status || 0, x.responseText || '');
+                var syncStatus = x.status || 0;
+                var syncText = x.responseText || '';
+                if (shouldUseUsherPlaylistCorsFallback(meta, syncStatus, syncText, syncStatus > 0 ? 'success' : 'status0')) {
+                    return buildUsherPlaylistCorsFallbackResult(meta, ck, 'status0_sync');
+                }
+                if (syncStatus > 0) {
+                    cacheNetworkResponse(meta.requestKey, syncStatus, syncText);
                     recordNetworkRtt(meta.host, Date.now() - requestStartedAt);
                     if (meta.circuitEnabled) recordHostCircuitSuccess(meta.host);
                 } else if (meta.circuitEnabled) recordHostCircuitFailure(meta.host);
-                return {status: x.status || 0, responseText: x.responseText || '', checkResult: ck || 0};
+                return {status: syncStatus, responseText: syncText, checkResult: ck || 0};
             }
             return x;
         };
@@ -3748,11 +3806,11 @@
 
         // IMPLEMENTED: Synchronous HTTP request. Android: OkHttp sync call in WebView thread.
         // webOS: Sync XHR (blocks main thread). Required for upstream token fetch compatibility.
-        A.mMethodUrlHeaders = function (u, to, pm, m, ck, h) { var r = xhrReq(u, to, pm, m, ck, h, true); return res(r.status, r.responseText, r.checkResult); };
+        A.mMethodUrlHeaders = function (u, to, pm, m, ck, h) { var r = xhrReq(u, to, pm, m, ck, h, true); return res(r.status, r.responseText, r.checkResult, r.url); };
         // IMPLEMENTED: Async HTTP request (basic). Android: OkHttp async call.
         A.BasexmlHttpGet = function (u, to, pm, m, h, cb, ck, key, ok, err) { sendAsyncRequest(u, to, pm, m, h, function (status, text) { call(cb, [res(status, text, ck), key, ok, err, ck]); }); };
         // IMPLEMENTED: Async HTTP request (full, with extended check parameters). Android: OkHttp async.
-        A.XmlHttpGetFull = function (u, to, pm, m, h, cb, ck, c1, c2, c3, c4, c5, ok, err) { sendAsyncRequest(u, to, pm, m, h, function (status, text) { call(cb, [res(status, text, ck), ck, c1, c2, c3, c4, c5, ok, err]); }); };
+        A.XmlHttpGetFull = function (u, to, pm, m, h, cb, ck, c1, c2, c3, c4, c5, ok, err) { sendAsyncRequest(u, to, pm, m, h, function (status, text, responseUrl) { call(cb, [res(status, text, ck, responseUrl), ck, c1, c2, c3, c4, c5, ok, err]); }); };
 
         // --- Playback Start / Control ---
 
