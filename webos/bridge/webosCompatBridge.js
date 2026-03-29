@@ -284,6 +284,14 @@
     var VERSION_REFRESH_MIN_INTERVAL_MS = 10 * 60 * 1000;
     var BACK_DISPATCH_KEY = 113; // Android bridge uses KEYCODE_F2 as "back"
     var BRIDGE_DEBUG_ENABLED = isBridgeDebugEnabled();
+    var BRIDGE_DEBUG_EVENTS_MAX = 400;
+    var bridgeDebugSeq = 0;
+    var bridgeDebugRequestSeq = 0;
+    var bridgeDebugEvents = [];
+    var upstreamDebugWrapProbeId = 0;
+    var upstreamDebugWrapProbeAttempts = 0;
+    var UPSTREAM_DEBUG_WRAP_PROBE_INTERVAL_MS = 250;
+    var UPSTREAM_DEBUG_WRAP_PROBE_MAX_ATTEMPTS = 240;
     var PLAYER_SCENE_OPT_CHAT_MAX = 72;
     var PLAYER_SCENE_OPT_RECENT_ACTIVE = 48;
     var PLAYER_SCENE_OPT_VISIBILITY_MARGIN_PX = 96;
@@ -356,21 +364,306 @@
             return false;
         }
     }
+    function pushBridgeDebugEvent(payload) {
+        if (!Array.isArray(bridgeDebugEvents)) return;
+        bridgeDebugEvents.push(payload);
+        if (bridgeDebugEvents.length > BRIDGE_DEBUG_EVENTS_MAX) {
+            bridgeDebugEvents.splice(0, bridgeDebugEvents.length - BRIDGE_DEBUG_EVENTS_MAX);
+        }
+    }
+    function installBridgeDebugGlobals() {
+        if (!BRIDGE_DEBUG_ENABLED) return;
+        try {
+            w.__sttvDebugEvents = bridgeDebugEvents;
+        } catch (e1) {}
+        try {
+            if (typeof w.__sttvDebugDump !== 'function' || !w.__sttvDebugDump.__sttvOwned) {
+                var dump = function (limit) {
+                    var max = parseInt(limit, 10);
+                    var source = bridgeDebugEvents;
+                    if (!Array.isArray(source)) return '';
+                    if (!isFinite(max) || max <= 0 || max > source.length) max = source.length;
+                    var start = source.length - max;
+                    if (start < 0) start = 0;
+                    var out = [];
+                    var i;
+                    for (i = start; i < source.length; i++) {
+                        try {
+                            out.push(JSON.stringify(source[i]));
+                        } catch (e2) {}
+                    }
+                    return out.join('\n');
+                };
+                dump.__sttvOwned = true;
+                w.__sttvDebugDump = dump;
+            }
+        } catch (e3) {}
+    }
     function bridgeDebugLog(event, extra) {
         if (!BRIDGE_DEBUG_ENABLED) return;
-        var payload = {event: event || 'event', t: Date.now()};
+        var payload = {event: event || 'event', t: Date.now(), seq: ++bridgeDebugSeq};
         if (extra && typeof extra === 'object') {
             var key;
             for (key in extra) {
                 if (Object.prototype.hasOwnProperty.call(extra, key)) payload[key] = extra[key];
             }
         }
+        pushBridgeDebugEvent(payload);
         try {
             if (w.console && typeof w.console.log === 'function') {
                 w.console.log('[STTV webOS bridge]', JSON.stringify(payload));
             }
         } catch (e3) {}
     }
+    function nextBridgeDebugRequestId() {
+        bridgeDebugRequestSeq += 1;
+        return bridgeDebugRequestSeq;
+    }
+    function redactSensitiveDebugUrl(rawUrl) {
+        if (!rawUrl || typeof rawUrl !== 'string') return '';
+        var result = rawUrl;
+        try {
+            if (typeof w.URL === 'function') {
+                var parsed = new w.URL(rawUrl, w.location && w.location.href ? w.location.href : undefined);
+                if (parsed.searchParams && typeof parsed.searchParams.set === 'function') {
+                    if (parsed.searchParams.has('token')) parsed.searchParams.set('token', '[redacted]');
+                    if (parsed.searchParams.has('sig')) parsed.searchParams.set('sig', '[redacted]');
+                }
+                result = parsed.origin + parsed.pathname + parsed.search;
+            }
+        } catch (e) {}
+        if (result.indexOf('token=') !== -1 || result.indexOf('sig=') !== -1) {
+            result = result.replace(/([?&](?:token|sig)=)([^&]+)/gi, '$1[redacted]');
+        }
+        return result;
+    }
+    function safeDebugResponseLength(text) {
+        if (typeof text === 'string') return text.length;
+        if (text && typeof text.length === 'number') return text.length;
+        return 0;
+    }
+    function simplifyDebugArg(value) {
+        if (value === null) return null;
+        var type = typeof value;
+        if (type === 'number' || type === 'boolean') return value;
+        if (type === 'undefined') return 'undefined';
+        if (type === 'string') {
+            if (value.length <= 120) return value;
+            return value.slice(0, 120) + '...(len=' + value.length + ')';
+        }
+        if (type === 'function') return '[function ' + (value.name || 'anonymous') + ']';
+        if (Array.isArray(value)) return '[array len=' + value.length + ']';
+        if (type === 'object') return '[object]';
+        return '[' + type + ']';
+    }
+    function simplifyDebugArgs(argsLike) {
+        if (!argsLike || typeof argsLike.length !== 'number') return [];
+        var out = [];
+        var max = argsLike.length > 6 ? 6 : argsLike.length;
+        var i;
+        for (i = 0; i < max; i++) {
+            out.push(simplifyDebugArg(argsLike[i]));
+        }
+        if (argsLike.length > max) {
+            out.push('[+' + (argsLike.length - max) + ' more]');
+        }
+        return out;
+    }
+    function roundDebugNumber(value, decimals) {
+        var num = parseFloat(value);
+        if (!isFinite(num)) return 0;
+        var mul = Math.pow(10, decimals > 0 ? decimals : 0);
+        return Math.round(num * mul) / mul;
+    }
+    function getPlayerErrorCode(video) {
+        if (!video || !video.error) return 0;
+        var code = parseInt(video.error.code, 10);
+        return isFinite(code) ? code : 0;
+    }
+    function buildMainPlayerDebugState(video) {
+        if (!video) {
+            return {
+                readyState: 0,
+                networkState: 0,
+                currentTime: 0,
+                bufferedAhead: 0,
+                paused: true,
+                ended: false,
+                errorCode: 0
+            };
+        }
+        return {
+            readyState: parseInt(video.readyState, 10) || 0,
+            networkState: parseInt(video.networkState, 10) || 0,
+            currentTime: roundDebugNumber(video.currentTime, 3),
+            bufferedAhead: roundDebugNumber(getBufferedAheadSeconds(video), 3),
+            paused: !!video.paused,
+            ended: !!video.ended,
+            errorCode: getPlayerErrorCode(video)
+        };
+    }
+    function logMainPlayerEvent(name, extra) {
+        if (!BRIDGE_DEBUG_ENABLED) return;
+        var payload = buildMainPlayerDebugState(mv);
+        payload.name = name || 'event';
+        payload.mainType = ms && ms.type ? ms.type : 0;
+        if (extra && typeof extra === 'object') {
+            var key;
+            for (key in extra) {
+                if (Object.prototype.hasOwnProperty.call(extra, key)) payload[key] = extra[key];
+            }
+        }
+        bridgeDebugLog('main_player_event', payload);
+    }
+    function resolveCriticalNetworkDebugType(meta) {
+        if (!meta) return '';
+        var host = meta.host || '';
+        var pathLower = meta.pathLower || '';
+        if (host.indexOf('gql.twitch.tv') !== -1 || pathLower === '/gql') return 'gql';
+        if (host.indexOf('usher.ttvnw.net') !== -1 && (pathLower.indexOf('.m3u8') !== -1 || pathLower.indexOf('/api/channel/hls/') !== -1)) return 'usher';
+        if (host.indexOf('api.twitch.tv') !== -1 && (pathLower.indexOf('/helix/streams') === 0 || pathLower.indexOf('/helix/users') === 0)) return 'helix';
+        return '';
+    }
+    function buildCriticalNetworkDebugInfo(rawUrl, meta) {
+        if (!BRIDGE_DEBUG_ENABLED) return null;
+        var parsed = meta || safeParseRequestMeta(rawUrl);
+        var requestType = resolveCriticalNetworkDebugType(parsed);
+        if (!requestType) return null;
+        var path = parsed.path || '/';
+        if (path.length > 160) path = path.slice(0, 160);
+        return {
+            type: requestType,
+            host: parsed.host || '',
+            path: path,
+            url: redactSensitiveDebugUrl(rawUrl || '')
+        };
+    }
+    function logCriticalNetworkRequestStart(info, reqId, method, timeoutMs, syncMode, requestKey, dedupeEnabled, circuitEnabled, body) {
+        if (!info) return;
+        bridgeDebugLog('network_request_start', {
+            reqId: reqId,
+            kind: info.type,
+            method: method,
+            host: info.host,
+            path: info.path,
+            url: info.url,
+            timeoutMs: timeoutMs || 0,
+            mode: syncMode ? 'sync' : 'async',
+            requestKey: requestKey || '',
+            dedupe: !!dedupeEnabled,
+            circuit: !!circuitEnabled,
+            bodyLength: typeof body === 'string' ? body.length : 0
+        });
+    }
+    function logCriticalNetworkRequestEnd(info, reqId, status, startedAt, reason, responseText, extra) {
+        if (!info) return;
+        var payload = {
+            reqId: reqId,
+            kind: info.type,
+            host: info.host,
+            path: info.path,
+            status: status || 0,
+            durationMs: startedAt > 0 ? Date.now() - startedAt : 0,
+            responseLength: safeDebugResponseLength(responseText || ''),
+            reason: reason || ((status || 0) > 0 ? 'success' : 'status0')
+        };
+        if (extra && typeof extra === 'object') {
+            var key;
+            for (key in extra) {
+                if (Object.prototype.hasOwnProperty.call(extra, key)) payload[key] = extra[key];
+            }
+        }
+        bridgeDebugLog('network_request_end', payload);
+    }
+    function getOfflineDebugWrapTargets() {
+        return ['Play_CheckIfIsLiveClean', 'Play_CheckIfIsLiveCleanEnd', 'Play_PannelEndStart', 'Play_StayCheckLiveResultEnd'];
+    }
+    function getRequiredOfflineDebugWrapTargets() {
+        return ['Play_CheckIfIsLiveClean', 'Play_CheckIfIsLiveCleanEnd', 'Play_PannelEndStart'];
+    }
+    function areRequiredOfflineDebugWrappersReady() {
+        var required = getRequiredOfflineDebugWrapTargets();
+        var i;
+        for (i = 0; i < required.length; i++) {
+            if (typeof w[required[i]] !== 'function' || !w[required[i]].__sttvDebugWrapped) return false;
+        }
+        return true;
+    }
+    function wrapOfflineDecisionFunctionForDebug(name) {
+        if (!BRIDGE_DEBUG_ENABLED || !name || typeof w[name] !== 'function') return false;
+        if (w[name].__sttvDebugWrapped) return true;
+        var original = w[name];
+        var wrapped = function () {
+            bridgeDebugLog('offline_decision_entry', {
+                name: name,
+                args: simplifyDebugArgs(arguments)
+            });
+            try {
+                var result = original.apply(this, arguments);
+                bridgeDebugLog('offline_decision_exit', {
+                    name: name,
+                    result: simplifyDebugArg(result)
+                });
+                return result;
+            } catch (err) {
+                bridgeDebugLog('offline_decision_throw', {
+                    name: name,
+                    message: err && err.message ? String(err.message) : String(err)
+                });
+                throw err;
+            }
+        };
+        wrapped.__sttvDebugWrapped = true;
+        wrapped.__sttvDebugOriginal = original;
+        w[name] = wrapped;
+        bridgeDebugLog('offline_decision_wrap_installed', {name: name});
+        return true;
+    }
+    function probeOfflineDecisionDebugWrappers() {
+        if (!BRIDGE_DEBUG_ENABLED) return;
+        upstreamDebugWrapProbeAttempts += 1;
+        var targets = getOfflineDebugWrapTargets();
+        var required = getRequiredOfflineDebugWrapTargets();
+        var i;
+        var readyRequired = 0;
+        var wrappedAny = false;
+        var missingRequired = [];
+        for (i = 0; i < targets.length; i++) {
+            if (wrapOfflineDecisionFunctionForDebug(targets[i])) wrappedAny = true;
+        }
+        for (i = 0; i < required.length; i++) {
+            if (typeof w[required[i]] === 'function' && w[required[i]].__sttvDebugWrapped) readyRequired += 1;
+            else missingRequired.push(required[i]);
+        }
+        if (wrappedAny) {
+            bridgeDebugLog('offline_decision_probe_progress', {
+                attempt: upstreamDebugWrapProbeAttempts,
+                readyRequired: readyRequired,
+                requiredTotal: required.length
+            });
+        }
+        if (readyRequired >= required.length || upstreamDebugWrapProbeAttempts >= UPSTREAM_DEBUG_WRAP_PROBE_MAX_ATTEMPTS) {
+            if (upstreamDebugWrapProbeId) {
+                w.clearInterval(upstreamDebugWrapProbeId);
+                upstreamDebugWrapProbeId = 0;
+            }
+            bridgeDebugLog('offline_decision_probe_done', {
+                attempt: upstreamDebugWrapProbeAttempts,
+                readyRequired: readyRequired,
+                requiredTotal: required.length,
+                missingRequired: missingRequired
+            });
+        }
+    }
+    function installOfflineDecisionDebugWrappers() {
+        if (!BRIDGE_DEBUG_ENABLED) return;
+        probeOfflineDecisionDebugWrappers();
+        if (areRequiredOfflineDebugWrappersReady()) return;
+        if (upstreamDebugWrapProbeId) return;
+        if (upstreamDebugWrapProbeAttempts >= UPSTREAM_DEBUG_WRAP_PROBE_MAX_ATTEMPTS) return;
+        upstreamDebugWrapProbeId = w.setInterval(probeOfflineDecisionDebugWrappers, UPSTREAM_DEBUG_WRAP_PROBE_INTERVAL_MS);
+    }
+    installBridgeDebugGlobals();
     // Polyfills for ES6+ features missing on older webOS WebKit runtimes.
     // Android: modern WebView has these natively. webOS 3.x/4.x may not.
     function installLegacyRuntimePolyfills() {
@@ -1251,6 +1544,7 @@
             mainErrorCount = 0;
             clearMainStallTimer();
             markMainProgressBaseline();
+            logMainPlayerEvent('loadedmetadata', {resumeMs: ms.resume || 0});
             tryPlay(mv);
             applyAudio();
         });
@@ -1260,6 +1554,7 @@
             clearMainStallTimer();
             markMainProgressBaseline();
             setMainLoading(false);
+            logMainPlayerEvent('canplay');
         });
         // playing: playback started or resumed. Hide loader immediately.
         mv.addEventListener('playing', function () {
@@ -1267,6 +1562,7 @@
             clearMainStallTimer();
             markMainProgressBaseline();
             setMainLoading(false);
+            logMainPlayerEvent('playing');
         });
         // pause: user paused or stream ended. Hide loader if not ended.
         mv.addEventListener('pause', function () {
@@ -1274,6 +1570,7 @@
             clearMainDecoderJamRecoveryTimer();
             if (!mv || mv.ended) return;
             setMainLoading(false);
+            logMainPlayerEvent('pause');
         });
         // loadeddata: first frame decoded. Hide loader immediately.
         mv.addEventListener('loadeddata', function () {
@@ -1281,6 +1578,7 @@
             clearMainStallTimer();
             markMainProgressBaseline();
             setMainLoading(false);
+            logMainPlayerEvent('loadeddata');
         });
         // timeupdate: fires ~4Hz during playback. Opportunistically hides loader.
         mv.addEventListener('timeupdate', function () {
@@ -1305,16 +1603,19 @@
         mv.addEventListener('seeking', function () {
             requestMainLoadingShow();
             scheduleMainStallCheck();
+            logMainPlayerEvent('seeking');
         });
         // waiting: playback stalled (buffer underrun). Show loader unless user-paused.
         mv.addEventListener('waiting', function () {
             if (isVideoPausedByUser(mv)) {
                 clearMainStallTimer();
                 setMainLoading(false);
+                logMainPlayerEvent('waiting', {pausedByUser: true});
                 return;
             }
             requestMainLoadingShow();
             scheduleMainStallCheck();
+            logMainPlayerEvent('waiting', {pausedByUser: false});
         });
         // stalled: network stall. For live HLS, this can fire during normal
         // inter-segment idle gaps. Only treat as buffering when buffer is low.
@@ -1322,20 +1623,24 @@
             if (isVideoPausedByUser(mv)) {
                 clearMainStallTimer();
                 setMainLoading(false);
+                logMainPlayerEvent('stalled', {pausedByUser: true});
                 return;
             }
             if (mv.readyState >= 3) {
                 clearMainLoadingShowTimer();
                 scheduleMainStallCheck();
+                logMainPlayerEvent('stalled', {readyStateFastPath: true});
                 return;
             }
             requestMainLoadingShow();
             scheduleMainStallCheck();
+            logMainPlayerEvent('stalled', {readyStateFastPath: false});
         });
         // ended: playback finished. Notify upstream app.
         mv.addEventListener('ended', function () {
             clearMainStallTimer();
             clearMainDecoderJamRecoveryTimer();
+            logMainPlayerEvent('ended');
             call('Play_PannelEndStart', [ms.type, 0, 0]);
         });
         // error: playback error. Retry up to 2x, then escalate to upstream failure handler.
@@ -1343,6 +1648,7 @@
             clearMainStallTimer();
             clearMainDecoderJamRecoveryTimer();
             setMainLoading(false);
+            logMainPlayerEvent('error', {errorCode: mv && mv.error ? mv.error.code || 0 : 0});
             if (mv && mv.error && mv.error.code === 1) return;
             if (retryMainPlayback()) return;
             handleMainPlaybackFailure(1, mv && mv.error ? mv.error.code || 0 : 0);
@@ -1933,11 +2239,22 @@
             ' errCount=' + mainErrorCount);
     }
     function attemptDecoderJamRecovery() {
-        if (!isMainActive() || !mv) return false;
-        if (isVideoPausedByUser(mv) || mv.ended) return false;
+        if (!isMainActive() || !mv) {
+            bridgeDebugLog('decoder_recovery_skip', {reason: 'inactive_or_missing_video'});
+            return false;
+        }
+        if (isVideoPausedByUser(mv) || mv.ended) {
+            bridgeDebugLog('decoder_recovery_skip', {reason: 'paused_or_ended'});
+            return false;
+        }
         clearMainDecoderJamRecoveryTimer();
         requestMainLoadingShow();
         var startTime = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
+        bridgeDebugLog('decoder_recovery_start', {
+            startTime: roundDebugNumber(startTime, 3),
+            readyState: mv.readyState || 0,
+            networkState: mv.networkState || 0
+        });
         debugStallDecision('decoder_jam', 'soft_recovery_start');
         try { mv.pause(); } catch (e) {}
         w.setTimeout(function () {
@@ -1959,9 +2276,19 @@
                 setMainLoading(false);
                 clearMainLoadingShowTimer();
                 debugStallDecision('decoder_jam_recovered', 'soft_recovery_check');
+                bridgeDebugLog('decoder_recovery_result', {
+                    recovered: true,
+                    startTime: roundDebugNumber(startTime, 3),
+                    currentTime: roundDebugNumber(current, 3)
+                });
                 return;
             }
             debugStallDecision('decoder_jam_failed', 'soft_recovery_check');
+            bridgeDebugLog('decoder_recovery_result', {
+                recovered: false,
+                startTime: roundDebugNumber(startTime, 3),
+                currentTime: roundDebugNumber(current, 3)
+            });
             handleMainPlaybackFailure(1, 0);
         }, DECODER_JAM_SOFT_RECOVERY_MS);
         return true;
@@ -1974,35 +2301,63 @@
 
     // Retries main player playback after error. Returns true if retry was initiated.
     function retryMainPlayback() {
-        if (!isMainActive() || !mv) return false;
-        if (isVideoPausedByUser(mv)) return false;
+        if (!isMainActive() || !mv) {
+            bridgeDebugLog('main_retry_skip', {reason: 'inactive_or_missing_video'});
+            return false;
+        }
+        if (isVideoPausedByUser(mv)) {
+            bridgeDebugLog('main_retry_skip', {reason: 'paused_by_user'});
+            return false;
+        }
         var now = Date.now();
         if (mainLastHardReloadMs > 0 && now - mainLastHardReloadMs > HARD_RELOAD_COOLDOWN_WINDOW_MS) {
             mainHardReloadCount = 0;
         }
         if (mainHardReloadCount >= HARD_RELOAD_MAX_IN_WINDOW) {
             debugStallDecision('network_buffering', 'retry_cooldown_block');
+            bridgeDebugLog('main_retry_skip', {
+                reason: 'hard_reload_cooldown',
+                hardReloadCount: mainHardReloadCount,
+                cooldownWindowMs: HARD_RELOAD_COOLDOWN_WINDOW_MS
+            });
             return false;
         }
-        if (mainErrorCount >= 2) return false;
+        if (mainErrorCount >= 2) {
+            bridgeDebugLog('main_retry_skip', {reason: 'max_retry_count', errorCount: mainErrorCount});
+            return false;
+        }
         clearMainDecoderJamRecoveryTimer();
         mainErrorCount += 1;
+        var attempt = mainErrorCount;
         requestMainLoadingShow();
         if (ms.type === 2 || ms.type === 3) ms.resume = mtime();
+        bridgeDebugLog('main_retry_scheduled', {
+            attempt: attempt,
+            delayMs: 120 * attempt,
+            mainType: ms.type || 0,
+            resumeMs: ms.resume || 0
+        });
         w.setTimeout(function () {
-            if (!isMainActive() || !mv) return;
+            if (!isMainActive() || !mv) {
+                bridgeDebugLog('main_retry_aborted', {reason: 'inactive_before_retry', attempt: attempt});
+                return;
+            }
             var loadNow = Date.now();
             if (mainLastHardReloadMs > 0 && loadNow - mainLastHardReloadMs > HARD_RELOAD_COOLDOWN_WINDOW_MS) {
                 mainHardReloadCount = 0;
             }
             mainHardReloadCount += 1;
             mainLastHardReloadMs = loadNow;
+            bridgeDebugLog('main_retry_execute', {
+                attempt: attempt,
+                hardReloadCount: mainHardReloadCount
+            });
             try {
                 mv.load();
             } catch (e) {}
             tryPlay(mv);
             applyAudio();
-        }, 120 * mainErrorCount);
+        }, 120 * attempt);
         return true;
     }
     function retryPreviewPlayback() {
@@ -2043,26 +2398,45 @@
         setMainLoading(false);
         clearMainStallTimer();
         resetMainRecoveryState();
+        bridgeDebugLog('main_failure_handle', {
+            failType: ft,
+            errorCode: ec,
+            mainType: ms && ms.type ? ms.type : 0,
+            hasLiveCheck: typeof w.Play_CheckIfIsLiveClean === 'function'
+        });
         // For live playback, prefer the live-clean path to avoid aggressive forced
         // end/start loops that can bounce back to the home screen on transient failures.
         if ((ms.type || 1) === 1 && typeof w.Play_CheckIfIsLiveClean === 'function') {
             clear(mv);
+            bridgeDebugLog('main_failure_branch', {branch: 'Play_CheckIfIsLiveClean', failType: ft, errorCode: ec});
             call('Play_CheckIfIsLiveClean', [ft, ec]);
             return;
         }
+        bridgeDebugLog('main_failure_branch', {branch: 'Play_PannelEndStart', mainType: ms.type || 0, failType: ft, errorCode: ec});
         call('Play_PannelEndStart', [ms.type, ft, ec]);
     }
     // Schedules an 8-second stall check for main player. If unresolved, retries or fails.
     function scheduleMainStallCheck() {
         clearMainStallTimer();
+        bridgeDebugLog('main_stall_timer_scheduled', {
+            delayMs: 8000,
+            readyState: mv ? mv.readyState || 0 : 0,
+            networkState: mv ? mv.networkState || 0 : 0
+        });
         mainStallTimerId = w.setTimeout(function () {
             mainStallTimerId = 0;
             var classification = classifyMainStall();
             debugStallDecision(classification, 'stall_timer');
+            bridgeDebugLog('main_stall_timer_fired', {
+                classification: classification,
+                readyState: mv ? mv.readyState || 0 : 0,
+                networkState: mv ? mv.networkState || 0 : 0
+            });
             if (classification === 'not_applicable') {
                 setMainLoading(false);
                 clearMainLoadingShowTimer();
                 if (!isMainActive()) stopMainIfLeavingPlayerScene(0);
+                bridgeDebugLog('main_stall_timer_outcome', {classification: classification, outcome: 'not_applicable'});
                 return;
             }
             if (classification === 'transient') {
@@ -2072,16 +2446,31 @@
                 if (hadLoader && isMainActive() && mv && !isVideoPausedByUser(mv) && !mv.ended) {
                     scheduleMainStallCheck();
                 }
+                bridgeDebugLog('main_stall_timer_outcome', {
+                    classification: classification,
+                    outcome: hadLoader && isMainActive() && mv && !isVideoPausedByUser(mv) && !mv.ended ? 'rescheduled' : 'cleared'
+                });
                 return;
             }
             if (classification === 'decoder_jam') {
                 if (maybeAutoClearMainLoading('stall_timer', 1000)) return;
-                if (attemptDecoderJamRecovery()) return;
+                if (attemptDecoderJamRecovery()) {
+                    bridgeDebugLog('main_stall_timer_outcome', {classification: classification, outcome: 'decoder_soft_recovery'});
+                    return;
+                }
+                bridgeDebugLog('main_stall_timer_outcome', {classification: classification, outcome: 'decoder_fail_handle_failure'});
                 handleMainPlaybackFailure(1, 0);
                 return;
             }
-            if (maybeAutoClearMainLoading('stall_timer', 1000)) return;
-            if (retryMainPlayback()) return;
+            if (maybeAutoClearMainLoading('stall_timer', 1000)) {
+                bridgeDebugLog('main_stall_timer_outcome', {classification: classification, outcome: 'auto_clear_loader'});
+                return;
+            }
+            if (retryMainPlayback()) {
+                bridgeDebugLog('main_stall_timer_outcome', {classification: classification, outcome: 'retry'});
+                return;
+            }
+            bridgeDebugLog('main_stall_timer_outcome', {classification: classification, outcome: 'handle_failure'});
             handleMainPlaybackFailure(1, 0);
         }, 8000);
     }
@@ -2528,21 +2917,23 @@
         pruneOldestMapEntries(networkCircuitByHost, NETWORK_CIRCUIT_HOST_MAX);
     }
     function clearInFlightRequestByKey(key, xhrRef) {
-        if (!key) return;
+        if (!key) return false;
         var current = networkInFlightByKey[key];
-        if (!current) return;
-        if (xhrRef && current.xhr !== xhrRef) return;
+        if (!current) return false;
+        if (xhrRef && current.xhr !== xhrRef) return false;
         delete networkInFlightByKey[key];
+        return true;
     }
     function abortInFlightRequestByKey(key) {
-        if (!key) return;
+        if (!key) return false;
         var current = networkInFlightByKey[key];
-        if (!current || !current.xhr) return;
+        if (!current || !current.xhr) return false;
         try {
             current.xhr.__sttvAbortReason = 'dedupe';
             if (current.xhr.readyState !== 4) current.xhr.abort();
         } catch (e) {}
         delete networkInFlightByKey[key];
+        return true;
     }
     function registerInFlightRequest(key, xhrRef) {
         if (!key || !xhrRef) return;
@@ -2770,11 +3161,14 @@
         var body = req.body;
         var callback = typeof cb === 'function' ? cb : function () {};
         var meta = buildNetworkRequestMeta(u, method, body);
+        var debugInfo = buildCriticalNetworkDebugInfo(u, meta);
+        var debugRequestId = debugInfo ? nextBridgeDebugRequestId() : 0;
         maybePruneNetworkState();
         var effectiveTimeout = getEffectiveTimeoutMs(to, meta);
         var requestStartedAt = Date.now();
         var x;
         var done = false;
+        logCriticalNetworkRequestStart(debugInfo, debugRequestId, method, effectiveTimeout, false, meta.requestKey, meta.dedupeEnabled, meta.circuitEnabled, body);
         var finish = function (status, text, reason) {
             if (done) return;
             done = true;
@@ -2800,13 +3194,15 @@
             }
             callback = null;
             x = null;
+            logCriticalNetworkRequestEnd(debugInfo, debugRequestId, finalStatus, requestStartedAt, reason, finalText);
             if (callbackRef) callbackRef(finalStatus, finalText);
         };
         if (meta.circuitEnabled && isCircuitOpenForHost(meta.host)) {
             finish(0, '', 'circuit_open');
             return;
         }
-        if (meta.dedupeEnabled) abortInFlightRequestByKey(meta.requestKey);
+        var dedupeAborted = meta.dedupeEnabled ? abortInFlightRequestByKey(meta.requestKey) : false;
+        if (dedupeAborted && debugInfo) bridgeDebugLog('network_request_dedupe_abort', {reqId: debugRequestId, kind: debugInfo.type, requestKey: meta.requestKey || ''});
         try {
             x = new XMLHttpRequest();
             x.open(method, u, true);
@@ -2833,8 +3229,12 @@
         var method = req.method;
         var body = req.body;
         var meta = buildNetworkRequestMeta(u, method, body);
+        var debugInfo = buildCriticalNetworkDebugInfo(u, meta);
+        var debugRequestId = debugInfo ? nextBridgeDebugRequestId() : 0;
+        var requestStartedAt = Date.now();
         maybePruneNetworkState();
         var effectiveTimeout = getEffectiveTimeoutMs(to, meta, sync);
+        logCriticalNetworkRequestStart(debugInfo, debugRequestId, method, effectiveTimeout, !!sync, meta.requestKey, meta.dedupeEnabled, meta.circuitEnabled, body);
         // Stale-while-revalidate: for sync requests, serve cached data immediately
         // to avoid blocking the main thread. Fresh = return as-is. Stale = return
         // immediately but fire an async refresh in the background.
@@ -2842,36 +3242,56 @@
             var cached = getCachedNetworkResponse(meta.requestKey);
             if (cached) {
                 if (cached.isStale) sendAsyncRequest(u, to, pm, m, h, function () {});
+                logCriticalNetworkRequestEnd(debugInfo, debugRequestId, cached.status, requestStartedAt, cached.isStale ? 'cache_stale' : 'cache_hit', cached.responseText, {
+                    cache: true
+                });
                 return {status: cached.status, responseText: cached.responseText, checkResult: ck || 0};
             }
         }
         if (meta.circuitEnabled && isCircuitOpenForHost(meta.host)) {
             if (sync) {
                 var cachedCircuit = getCachedNetworkResponse(meta.requestKey);
-                if (cachedCircuit) return {status: cachedCircuit.status, responseText: cachedCircuit.responseText, checkResult: ck || 0};
+                if (cachedCircuit) {
+                    logCriticalNetworkRequestEnd(debugInfo, debugRequestId, cachedCircuit.status, requestStartedAt, 'circuit_open_cache', cachedCircuit.responseText, {
+                        cache: true
+                    });
+                    return {status: cachedCircuit.status, responseText: cachedCircuit.responseText, checkResult: ck || 0};
+                }
             }
+            logCriticalNetworkRequestEnd(debugInfo, debugRequestId, 0, requestStartedAt, 'circuit_open', '');
             return {status: 0, responseText: '', checkResult: ck || 0};
         }
-        if (meta.dedupeEnabled) abortInFlightRequestByKey(meta.requestKey);
+        var dedupeAborted = meta.dedupeEnabled ? abortInFlightRequestByKey(meta.requestKey) : false;
+        if (dedupeAborted && debugInfo) bridgeDebugLog('network_request_dedupe_abort', {reqId: debugRequestId, kind: debugInfo.type, requestKey: meta.requestKey || ''});
         var doRequest = function (targetUrl) {
             var x = new XMLHttpRequest();
-            var requestStartedAt = Date.now();
+            var requestStartedAtLocal = Date.now();
+            var asyncFailureReason = '';
             x.open(method, targetUrl, !sync);
             try {
                 x.timeout = effectiveTimeout;
             } catch (e0) {}
             if (!sync) {
                 if (meta.dedupeEnabled) registerInFlightRequest(meta.requestKey, x);
+                x.onerror = function () { asyncFailureReason = 'network_error'; };
+                x.ontimeout = function () { asyncFailureReason = 'timeout'; };
+                x.onabort = function () { asyncFailureReason = x && x.__sttvAbortReason === 'dedupe' ? 'dedupe_abort' : 'abort'; };
                 try {
                     x.onloadend = function () {
                         if (meta.dedupeEnabled) clearInFlightRequestByKey(meta.requestKey, x);
                         if ((x.status || 0) > 0) {
                             cacheNetworkResponse(meta.requestKey, x.status || 0, x.responseText || '');
-                            recordNetworkRtt(meta.host, Date.now() - requestStartedAt);
+                            recordNetworkRtt(meta.host, Date.now() - requestStartedAtLocal);
                             if (meta.circuitEnabled) recordHostCircuitSuccess(meta.host);
                         } else if (meta.circuitEnabled && x.__sttvAbortReason !== 'dedupe') recordHostCircuitFailure(meta.host);
+                        logCriticalNetworkRequestEnd(debugInfo, debugRequestId, x.status || 0, requestStartedAtLocal, (x.status || 0) > 0 ? 'success' : (asyncFailureReason || 'status0'), x.responseText || '');
                         // Break XHR event handler retain cycle.
-                        try { x.onloadend = null; } catch (eCleanup) {}
+                        try {
+                            x.onloadend = null;
+                            x.onerror = null;
+                            x.ontimeout = null;
+                            x.onabort = null;
+                        } catch (eCleanup) {}
                         x = null;
                     };
                 } catch (eLoad) {}
@@ -2882,17 +3302,20 @@
             } catch (e2) {
                 if (sync) {
                     if (meta.circuitEnabled) recordHostCircuitFailure(meta.host);
+                    logCriticalNetworkRequestEnd(debugInfo, debugRequestId, 0, requestStartedAtLocal, 'request_exception', '');
                     return {status: 0, responseText: '', checkResult: ck || 0};
                 } else if (meta.dedupeEnabled) {
                     clearInFlightRequestByKey(meta.requestKey, x);
                 }
+                logCriticalNetworkRequestEnd(debugInfo, debugRequestId, 0, requestStartedAtLocal, 'request_exception', '');
             }
             if (sync) {
                 if ((x.status || 0) > 0) {
                     cacheNetworkResponse(meta.requestKey, x.status || 0, x.responseText || '');
-                    recordNetworkRtt(meta.host, Date.now() - requestStartedAt);
+                    recordNetworkRtt(meta.host, Date.now() - requestStartedAtLocal);
                     if (meta.circuitEnabled) recordHostCircuitSuccess(meta.host);
                 } else if (meta.circuitEnabled) recordHostCircuitFailure(meta.host);
+                logCriticalNetworkRequestEnd(debugInfo, debugRequestId, x.status || 0, requestStartedAtLocal, (x.status || 0) > 0 ? 'success' : 'status0', x.responseText || '');
                 return {status: x.status || 0, responseText: x.responseText || '', checkResult: ck || 0};
             }
             return x;
@@ -3059,6 +3482,7 @@
     function forceHideBrowserFallbackUi() {
         var ids = ['player_embed_clicks', 'twitch-embed', 'clip_embed', 'scene2_click'];
         var i;
+        bridgeDebugLog('browser_fallback_hide', {ids: ids});
         for (i = 0; i < ids.length; i++) {
             if (typeof w.Main_HideElement === 'function') {
                 w.Main_HideElement(ids[i]);
@@ -3141,6 +3565,12 @@
             }
             var original = w[name];
             var wrapped = function () {
+                if (isBridgePolyfillActive()) {
+                    bridgeDebugLog('browser_fallback_intercept', {
+                        name: name,
+                        args: simplifyDebugArgs(arguments)
+                    });
+                }
                 return handler(original, arguments);
             };
             wrapped.__sttvNoFallbackPatched = true;
@@ -4446,6 +4876,8 @@
     // Keep upstream proxy selection behavior. Bridge does not force provider defaults.
     // 9) Install launch/relaunch event bridge.
     initLaunch();
+    // 9b) Install debug-only wrappers around upstream offline/recheck entry points.
+    installOfflineDecisionDebugWrappers();
     // 10) Harden scene transitions and start player-scene optimizer.
     installSceneSafetyPatches();
     installPlayerSceneOptimizerMonitor();
