@@ -18,7 +18,6 @@ var MAX_RESPONSE_BYTES = 1024 * 1024;
 var DEFAULT_TIMEOUT_MS = 4500;
 var MIN_TIMEOUT_MS = 1200;
 var MAX_TIMEOUT_MS = 7000;
-var DEFAULT_BROWSER_UA = 'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36';
 var DEFAULT_ACCEPT_LANGUAGE = 'en-US,en;q=0.9';
 
 function clampTimeout(value) {
@@ -84,7 +83,7 @@ service.register('fetchPlaylist', function (message) {
     var timeoutMs = clampTimeout(payload.timeoutMs);
     var requestOrigin = normalizeHeaderValue(payload.origin, 256);
     var requestReferer = normalizeHeaderValue(payload.referer, 1024);
-    var requestUserAgent = normalizeHeaderValue(payload.userAgent, 512) || DEFAULT_BROWSER_UA;
+    var requestUserAgent = normalizeHeaderValue(payload.userAgent, 512);
     var requestAcceptLanguage = normalizeHeaderValue(payload.acceptLanguage, 256) || DEFAULT_ACCEPT_LANGUAGE;
     var finished = false;
 
@@ -96,11 +95,11 @@ service.register('fetchPlaylist', function (message) {
     var requestHeaders = {
         Accept: '*/*',
         'Accept-Encoding': 'identity',
-        'Accept-Language': requestAcceptLanguage,
-        'User-Agent': requestUserAgent
+        'Accept-Language': requestAcceptLanguage
     };
     if (requestOrigin) requestHeaders.Origin = requestOrigin;
     if (requestReferer) requestHeaders.Referer = requestReferer;
+    if (requestUserAgent) requestHeaders['User-Agent'] = requestUserAgent;
     requestHeaders['Sec-Fetch-Mode'] = 'cors';
     requestHeaders['Sec-Fetch-Site'] = 'cross-site';
 

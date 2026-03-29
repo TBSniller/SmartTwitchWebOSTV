@@ -1201,13 +1201,14 @@
         var seen = {};
         var i;
         for (i = 0; i < l.length; i++) {
-            if (l[i].indexOf('#EXT-X-STREAM-INF:') !== 0) continue;
-            var n = l[i + 1];
+            var streamLine = l[i] && typeof l[i] === 'string' ? l[i].trim() : '';
+            if (streamLine.toUpperCase().indexOf('#EXT-X-STREAM-INF:') !== 0) continue;
+            var n = l[i + 1] && typeof l[i + 1] === 'string' ? l[i + 1].trim() : '';
             if (!n || n.indexOf('#') === 0) continue;
-            var rm = l[i].match(/RESOLUTION=\d+x(\d+)/);
-            var fm = l[i].match(/FRAME-RATE=([0-9.]+)/);
-            var cm = l[i].match(/CODECS="([^"]+)"/i);
-            var bm = l[i].match(/(?:AVERAGE-)?BANDWIDTH=(\d+)/i);
+            var rm = streamLine.match(/RESOLUTION=\d+x(\d+)/i);
+            var fm = streamLine.match(/FRAME-RATE=([0-9.]+)/i);
+            var cm = streamLine.match(/CODECS="([^"]+)"/i);
+            var bm = streamLine.match(/(?:AVERAGE-)?BANDWIDTH=(\d+)/i);
             var r = rm && rm[1] ? parseInt(rm[1], 10) : 0;
             var f = fm && fm[1] ? Math.round(parseFloat(fm[1]) / 10) * 10 : 30;
             var bw = bm && bm[1] ? parseInt(bm[1], 10) : 0;
@@ -2276,6 +2277,12 @@
         ms.q = parseQ(ms.playlist, ms.rawUri);
         ms.qp = -1;
         ms.resume = rs > 0 ? rs : 0;
+        bridgeDebugLog('main_playlist_parsed', {
+            count: ms.q.length,
+            hasPlaylist: !!ms.playlist,
+            hasRawUri: !!ms.rawUri,
+            firstQuality: ms.q[0] && ms.q[0].id ? ms.q[0].id : ''
+        });
         ms.uri = sourceFromQuality(ms, mainMaxRes);
         if (mv) {
             mv.src = ms.uri;
@@ -4169,11 +4176,21 @@
             if (!mv || ms.type === 3) return;
             ms.qp = typeof pos === 'number' ? pos : -1;
             var tg = sourceFromQuality(ms, mainMaxRes);
+            bridgeDebugLog('set_quality_attempt', {
+                pos: ms.qp,
+                available: ms.q.length,
+                hasTarget: !!tg,
+                sameTarget: !!(tg && tg === mv.src)
+            });
             if (!tg || tg === mv.src) return;
             ms.resume = ms.type === 2 || ms.type === 3 ? mtime() : 0;
             ms.uri = tg;
             mv.src = tg;
             try { mv.load(); } catch (e) {}
+            bridgeDebugLog('set_quality_applied', {
+                pos: ms.qp,
+                available: ms.q.length
+            });
         };
         // IMPLEMENTED: Returns available quality options as JSON array.
         A.getQualities = function () { var arr = [{id: 'Auto'}], i; for (i = 0; i < ms.q.length; i++) arr.push({id: ms.q[i].id}); return JSON.stringify(arr); };
