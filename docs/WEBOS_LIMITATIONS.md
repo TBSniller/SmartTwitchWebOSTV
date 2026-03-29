@@ -99,6 +99,17 @@ Reason:
 Impact:
 - Removing or renaming hosted channels requires a dedicated migration refactor across wrapper defaults and CI workflows.
 
+## 10) Twitch `usher` Playlist Fetch and Quality Metadata on webOS
+
+Status: **Mitigated in fork bridge/service**
+
+Reason:
+- Some webOS TV browser engines block cross-origin XHR to `https://usher.ttvnw.net/...m3u8` (CORS), even when direct media playback still works.
+
+Impact:
+- Bridge routes `usher` HLS master playlist fetches through local webOS JS service (`com.tbsniller.smarttwitchwebostv.hls`) instead of a proxy fallback.
+- When playlist text is available, bridge parses variants and triggers quality refresh to keep UI options aligned with available tracks.
+
 ## Related Docs
 - Current implementation/parity snapshot: `docs/WEBOS_PORTING_STATUS.md`
 - Upstream sync procedure: `docs/UPSTREAM_SYNC_PLAYBOOK.md`

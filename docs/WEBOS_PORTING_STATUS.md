@@ -14,6 +14,8 @@ This document is the canonical current-state snapshot for wrapper/bridge parity 
 - Core playback, preview playback, key handling, and platform-back flow are implemented.
 - Lifecycle handling (`visibilitychange`, `webkitvisibilitychange`, page show/hide) is implemented with guarded resume/stop behavior.
 - Relaunch/deeplink passthrough is implemented (`GetLastIntentObj`, `webOSRelaunch`).
+- Twitch `usher` HLS master playlist fetch is supported via local webOS JS service (`com.tbsniller.smarttwitchwebostv.hls`) to avoid browser CORS blocks on affected TVs.
+- Main-player quality list refresh mirrors Android timing by invoking `Play_getQualities(type, false)` from bridge after main playlist parse/start, keeping UI quality options in sync with parsed variants.
 
 ## Bridge/Parity Snapshot
 - Current bridge method totals in `initAndroid()`:
