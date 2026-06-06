@@ -8168,11 +8168,17 @@
     //Spacing for release maker not trow errors from jshint
     var version = {
         VersionBase: '3.0',
-        publishVersionCode: 377, //Always update (+1 to current value) Main_version_java after update publishVersionCode or a major update of the apk is released
-        ApkUrl: 'https://github.com/fgl27/SmartTwitchTV/releases/download/377/SmartTV_twitch_3_0_377.apk',
-        WebVersion: 'January 27 2026',
+        publishVersionCode: 379, //Always update (+1 to current value) Main_version_java after update publishVersionCode or a major update of the apk is released
+        ApkUrl: 'https://github.com/fgl27/SmartTwitchTV/releases/download/379/SmartTV_twitch_3_0_379.apk',
+        WebVersion: 'March 17 2026',
         WebTag: 727, //Always update (+1 to current value) Main_version_web after update Main_minversion or a major update of the web part of the app
         changelog: [
+            {
+                title: 'March 17 2026',
+                changes: [
+                    "Allow devices running android 7.0 and older to run the app again (5.0 and up only), GitHub update they encryption done on the application page, the new encryption wasn't supported by old devices."
+                ]
+            },
             {
                 title: 'January 27 2026',
                 changes: ['Add more fast forward speeds', 'General performance improvements and bug fixes']
@@ -24216,7 +24222,7 @@ https://video-weaver.sao03.hls.ttvnw.net/v1/playlist/C.m3u8 09:36:20.90
 
     var PlayClip_BaseUrl = 'https://gql.twitch.tv/gql';
     var PlayClip_postMessage =
-        '{"operationName":"VideoAccessToken_Clip","variables":{"slug":"%x"},"extensions":{"persistedQuery":{"version":1,"sha256Hash":"36b89d2507fce29e5ca551df756d27c1cfe079e2609642b4390aa4c35796eb11"}}}';
+        '{"operationName":"VideoAccessToken_Clip","variables":{"platform": "web","slug":"%x"},"extensions":{"persistedQuery":{"version":1,"sha256Hash":"4f35f1ac933d76b1da008c806cd5546a7534dfaff83e033a422a81f24e5991b3"}}}';
     var PlayClip_ExtraClipInfo =
         '{"query":"{clip(slug:\\"%x\\"){game{displayName},videoOffsetSeconds,broadcaster{roles{isPartner},displayName,profileImageURL(width: 300)}}}"}';
 
