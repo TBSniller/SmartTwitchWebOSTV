@@ -1,6 +1,6 @@
 {
   "id": "com.tbsniller.smarttwitchwebostv",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "vendor": "TBSniller",
   "type": "web",
   "main": "index.html",
@@ -15,6 +15,9 @@
   "supportQuickStart": false,
   "handlesRelaunch": true,
   "disableBackHistoryAPI": true,
+  "screenSaverProperties": {
+    "preferredType": 2
+  },
   "vendorExtension": {
     "allowCrossDomain": true
   }
