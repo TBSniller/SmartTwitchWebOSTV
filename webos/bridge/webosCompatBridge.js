@@ -165,10 +165,11 @@
     var sceneSafetyStopTimerId = 0;   // Deduped timer for delayed scene-leave cleanup.
     var mainLastProgressWallMs = 0;   // Last wall-clock timestamp with meaningful playback progress.
     var mainLastCurrentTime = 0;      // Last sampled main currentTime (seconds).
-    var mainLastBufferedAhead = 0;    // Last sampled buffered-ahead seconds for main.
     var mainHardReloadCount = 0;      // Number of hard reloads (mv.load) in current cooldown window.
     var mainLastHardReloadMs = 0;     // Wall-clock timestamp of most recent hard reload.
     var mainDecoderJamRecoveryTimerId = 0; // Timer id for decoder-jam soft recovery follow-up.
+    var mainDecoderJamResumeTimerId = 0;
+    var mainDecoderJamRecoveryActive = false;
 
     // --- Loading indicator state ---
     var mainLoadingSinceAt = 0;       // When main loader was first shown (for hysteresis).
@@ -897,7 +898,9 @@
         if (!isMainLoadingVisible()) return false;
         if (isBrowserFallbackVisible()) return false;
         if (!isMainActive() || !mv || !hasVideoSource(mv)) return false;
-        if (mv.ended || mv.paused || mv.readyState < 2) return false;
+        if (mv.ended || mv.paused || mv.seeking || mv.readyState < 2) return false;
+        // Buffered data and HAVE_CURRENT_DATA do not prove that playback is advancing.
+        if (mainDecoderJamRecoveryActive || now - mainLastProgressWallMs >= STALL_PROGRESS_THRESHOLD_MS) return false;
         var minMs = minVisibleMs > 0 ? minVisibleMs : 0;
         if (minMs > 0 && mainLoadingSinceAt > 0 && now - mainLoadingSinceAt < minMs) return false;
         clearMainStallTimer();
@@ -1296,6 +1299,8 @@
         });
         // pause: user paused or stream ended. Hide loader if not ended.
         mv.addEventListener('pause', function () {
+            // The recovery's own pause must not cancel its resume or follow-up check.
+            if (mainDecoderJamRecoveryActive) return;
             clearMainStallTimer();
             clearMainDecoderJamRecoveryTimer();
             if (!mv || mv.ended) return;
@@ -1312,7 +1317,7 @@
         mv.addEventListener('timeupdate', function () {
             mainErrorCount = 0;
             var current = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
-            if (current > mainLastCurrentTime + 0.01) {
+            if (Math.abs(current - mainLastCurrentTime) > 0.01) {
                 mainLastCurrentTime = current;
                 mainLastProgressWallMs = Date.now();
             }
@@ -1320,11 +1325,6 @@
         });
         // progress: new data downloaded. Opportunistically hides loader.
         mv.addEventListener('progress', function () {
-            var bufferedAhead = getBufferedAheadSeconds(mv);
-            if (bufferedAhead > mainLastBufferedAhead + 0.05) {
-                mainLastProgressWallMs = Date.now();
-            }
-            mainLastBufferedAhead = bufferedAhead;
             maybeAutoClearMainLoading('progress', 600);
         });
         // seeking: user seeked. Request debounced loader show + schedule stall check.
@@ -1839,6 +1839,7 @@
     // Android: ExoPlayer.seekTo(). webOS: video.currentTime = seconds.
     function seekMainToMs(positionMs) {
         if (!mv) return;
+        clearMainDecoderJamRecoveryTimer();
         var timeline = getVideoTimelineState(mv);
         var jumpPosition = positionMs > 0 ? positionMs : 0;
         var duration = timeline.durationMs > 0 ? timeline.durationMs : getMainDurationMs();
@@ -1922,15 +1923,16 @@
         previewStallTimerId = 0;
     }
     function clearMainDecoderJamRecoveryTimer() {
-        if (!mainDecoderJamRecoveryTimerId) return;
-        w.clearTimeout(mainDecoderJamRecoveryTimerId);
+        if (mainDecoderJamRecoveryTimerId) w.clearTimeout(mainDecoderJamRecoveryTimerId);
+        if (mainDecoderJamResumeTimerId) w.clearTimeout(mainDecoderJamResumeTimerId);
         mainDecoderJamRecoveryTimerId = 0;
+        mainDecoderJamResumeTimerId = 0;
+        mainDecoderJamRecoveryActive = false;
     }
     function resetMainRecoveryState() {
         clearMainDecoderJamRecoveryTimer();
         mainLastProgressWallMs = Date.now();
         mainLastCurrentTime = 0;
-        mainLastBufferedAhead = 0;
         mainHardReloadCount = 0;
         mainLastHardReloadMs = 0;
     }
@@ -1939,12 +1941,10 @@
         mainLastProgressWallMs = now;
         if (!mv) {
             mainLastCurrentTime = 0;
-            mainLastBufferedAhead = 0;
             return;
         }
         var current = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
         mainLastCurrentTime = current;
-        mainLastBufferedAhead = getBufferedAheadSeconds(mv);
     }
     function classifyMainStall() {
         if (!mv || !hasVideoSource(mv) || !isMainActive() || isVideoPausedByUser(mv) || mv.ended) return 'not_applicable';
@@ -1975,28 +1975,37 @@
             ' errCount=' + mainErrorCount);
     }
     function attemptDecoderJamRecovery() {
-        if (!isMainActive() || !mv) return false;
+        if (!isMainActive() || !mv || mainDecoderJamRecoveryActive) return false;
         if (isVideoPausedByUser(mv) || mv.ended) return false;
         clearMainDecoderJamRecoveryTimer();
         requestMainLoadingShow();
-        var startTime = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
+        var video = mv;
+        var source = video.src;
+        var startTime = !isNaN(video.currentTime) && isFinite(video.currentTime) ? video.currentTime : 0;
+        function isCurrentRecovery() {
+            return mainDecoderJamRecoveryActive && mv === video && video.src === source && isMainActive() && !video.ended;
+        }
+        mainDecoderJamRecoveryActive = true;
         debugStallDecision('decoder_jam', 'soft_recovery_start');
-        try { mv.pause(); } catch (e) {}
-        w.setTimeout(function () {
-            if (!isMainActive() || !mv) return;
-            if (isVideoPausedByUser(mv) || mv.ended) return;
-            tryPlay(mv);
+        try { video.pause(); } catch (e) {}
+        mainDecoderJamResumeTimerId = w.setTimeout(function () {
+            mainDecoderJamResumeTimerId = 0;
+            if (!isCurrentRecovery()) {
+                clearMainDecoderJamRecoveryTimer();
+                return;
+            }
+            // A real play/pause command cancels recovery before reaching this callback.
+            tryPlay(video);
             applyAudio();
         }, 100);
         mainDecoderJamRecoveryTimerId = w.setTimeout(function () {
-            mainDecoderJamRecoveryTimerId = 0;
-            if (!isMainActive() || !mv) return;
-            if (isVideoPausedByUser(mv) || mv.ended) {
-                setMainLoading(false);
+            if (!isCurrentRecovery()) {
+                clearMainDecoderJamRecoveryTimer();
                 return;
             }
-            var current = !isNaN(mv.currentTime) && isFinite(mv.currentTime) ? mv.currentTime : 0;
-            if (current > startTime + 0.1) {
+            var current = !isNaN(video.currentTime) && isFinite(video.currentTime) ? video.currentTime : 0;
+            clearMainDecoderJamRecoveryTimer();
+            if (!video.paused && current > startTime + 0.1) {
                 markMainProgressBaseline();
                 setMainLoading(false);
                 clearMainLoadingShowTimer();
@@ -4213,6 +4222,7 @@
                 sameTarget: sameTarget
             });
             if (!tg || sameTarget) return;
+            clearMainDecoderJamRecoveryTimer();
             ms.resume = ms.type === 2 || ms.type === 3 ? mtime() : 0;
             ms.uri = tg;
             mv.src = tg;
@@ -4524,7 +4534,12 @@
         };
         // IMPLEMENTED: Explicit play/pause control for both main and preview players.
         A.PlayPause = function (st) {
+            clearMainDecoderJamRecoveryTimer();
             var shouldPlay = !!st;
+            if (!shouldPlay) {
+                clearMainStallTimer();
+                setMainLoading(false);
+            }
             var targets = [mv, pv];
             var i;
             for (i = 0; i < targets.length; i++) {
@@ -4537,7 +4552,7 @@
         // IMPLEMENTED: Toggles playback state based on main player pause flag and notifies upstream callback.
         A.PlayPauseChange = function () {
             if (!mv) return;
-            var nextPlaying = mv.paused;
+            var nextPlaying = mainDecoderJamRecoveryActive ? false : mv.paused;
             A.PlayPause(nextPlaying);
             call('Play_PlayPauseChange', [nextPlaying, ms.type || 1]);
         };
