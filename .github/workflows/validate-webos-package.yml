@@ -1,0 +1,57 @@
+name: Validate webOS Package
+
+on:
+  pull_request:
+    branches:
+      - master
+      - dev/publish-pages
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webos-package-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare hosted artifact
+        run: npm run hosted:prepare
+
+      - name: Run lint checks
+        run: npm run lint
+
+      - name: Check screensaver metadata and dev isolation
+        run: node tools/webos/testScreensaverPackaging.js
+
+      - name: Build stable package without publishing
+        run: npm run webos:package
+
+      - name: Build dev package without publishing
+        run: |
+          node tools/release/prepareDevAppVariant.js \
+            --out-dir .tmp/ci-dev-app \
+            --dev-number 1 \
+            --target-url "https://tbsniller.github.io/SmartTwitchWebOSTV/dev/index.html"
+          node tools/release/prepareDevServiceVariant.js \
+            --out-dir .tmp/ci-dev-service \
+            --dev-appinfo .tmp/ci-dev-app/appinfo.json
+          npx --no-install ares-package .tmp/ci-dev-app .tmp/ci-dev-service -o .tmp/ci-dev-build/
