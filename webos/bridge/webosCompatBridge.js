@@ -199,8 +199,6 @@
     var statusLastBufferedEndSeconds = 0;
     var statusLiveOffsetMainDisplayMs = 0;
     var statusLiveOffsetPreviewDisplayMs = 0;
-    var liveLatencyOffsetMainMs = 0;
-    var liveLatencyOffsetPreviewMs = 0;
     // --- Launch/relaunch event state ---
     // Android: handled by Activity onNewIntent(). webOS: webOSRelaunch event.
     var launchEventHandlersInstalled = false;
@@ -1248,6 +1246,7 @@
         v.preload = 'metadata';
         v.playsInline = true;
         v.setAttribute('playsinline', 'playsinline');
+        v.addEventListener('loadstart', function () { v.__sttvLiveOffset = null; });
         v.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;background:#000;object-fit:cover;display:none;pointer-events:none;z-index:' + z;
         return v;
     }
@@ -1261,6 +1260,9 @@
             w.document.body.insertBefore(root, w.document.body.firstChild);
         }
         return true;
+    }
+    function refreshMainChatLatency() {
+        if (ms.type === 1 && w.Android && typeof w.Android.getLatency === 'function') w.Android.getLatency(0);
     }
     // Lazily creates root + main video and installs main event handlers.
     function ensure() {
@@ -1277,6 +1279,7 @@
         mv.addEventListener('loadedmetadata', function () {
             if (ms.resume > 0 && (ms.type === 2 || ms.type === 3)) try { mv.currentTime = Math.max(0, ms.resume / 1000); } catch (e) {}
             call('Play_UpdateDuration', [getMainDurationMs()]);
+            refreshMainChatLatency();
             mainErrorCount = 0;
             clearMainStallTimer();
             markMainProgressBaseline();
@@ -1292,6 +1295,7 @@
         });
         // playing: playback started or resumed. Hide loader immediately.
         mv.addEventListener('playing', function () {
+            refreshMainChatLatency();
             mainErrorCount = 0;
             clearMainStallTimer();
             markMainProgressBaseline();
@@ -1332,6 +1336,7 @@
             requestMainLoadingShow();
             scheduleMainStallCheck();
         });
+        mv.addEventListener('seeked', refreshMainChatLatency);
         // waiting: playback stalled (buffer underrun). Show loader unless user-paused.
         mv.addEventListener('waiting', function () {
             if (isVideoPausedByUser(mv)) {
@@ -1597,35 +1602,74 @@
         var out = seconds.toFixed(2);
         return (seconds < 10 ? '&nbsp;&nbsp;' : '') + out;
     }
-    // Calculates live stream latency offset (how far behind live edge).
-    // Android: ExoPlayer provides this natively. webOS: estimated from seekable window.
-    function getCurrentLiveOffsetMs(video, durationMs, positionMs, previewPath) {
+    // Prefer a native wall-clock mapping; other paths only estimate distance to available media.
+    // Do not subtract an inferred baseline or feed display smoothing back into chat timing.
+    function getCurrentLiveOffsetMs(video) {
         if (!video) return 0;
-        var liveOffsetMs = 0;
-        try {
-            if (video.seekable && video.seekable.length > 0) {
-                var liveEdge = video.seekable.end(video.seekable.length - 1);
-                var now = !isNaN(video.currentTime) && isFinite(video.currentTime) ? video.currentTime : 0;
-                liveOffsetMs = Math.max(0, Math.floor((liveEdge - now) * 1000));
+        var source = video.src || video.currentSrc || '';
+        var sample = video.__sttvLiveOffset;
+        if (!sample || sample.source !== source) {
+            sample = {source: source, valueMs: null, method: 'unavailable'};
+            video.__sttvLiveOffset = sample;
+        }
+        var offsetMs = null;
+        var method = 'unavailable';
+        var position = parseFloat(video.currentTime);
+        if (source && video.readyState >= 1 && isFinite(position) && position >= 0) {
+            // getStartDate(), when supported, maps media time zero to an absolute time.
+            try {
+                if (typeof video.getStartDate === 'function') {
+                    var startDate = video.getStartDate();
+                    var startMs = startDate && typeof startDate.getTime === 'function' ? startDate.getTime() : NaN;
+                    var wallOffsetMs = Date.now() - startMs - position * 1000;
+                    if (isFinite(startMs) && startMs > 0 && isFinite(wallOffsetMs) && wallOffsetMs >= 0 && wallOffsetMs <= 2147483647) {
+                        offsetMs = wallOffsetMs;
+                        method = 'wall_clock';
+                    }
+                }
+            } catch (e) {}
+            if (offsetMs === null) {
+                try {
+                    if (video.seekable && video.seekable.length) {
+                        var edge = video.seekable.end(video.seekable.length - 1);
+                        if (isFinite(edge) && edge >= position) {
+                            offsetMs = (edge - position) * 1000;
+                            method = 'seekable';
+                        }
+                    }
+                } catch (e2) {}
             }
-        } catch (e) {
-            liveOffsetMs = 0;
+            if (offsetMs === null) {
+                // Use the current element's timeline, not cached duration or startup placeholders.
+                var duration = parseFloat(video.duration);
+                if (isFinite(duration) && duration > 0 && duration >= position) {
+                    offsetMs = (duration - position) * 1000;
+                    method = 'duration';
+                }
+            }
+            if (offsetMs === null) {
+                try {
+                    var ranges = video.buffered;
+                    for (var i = 0; ranges && i < ranges.length; i++) {
+                        var start = ranges.start(i);
+                        var end = ranges.end(i);
+                        if (isFinite(start) && isFinite(end) && start <= position && position <= end) {
+                            offsetMs = (end - position) * 1000;
+                            method = 'buffered';
+                            break;
+                        }
+                    }
+                } catch (e3) {}
+            }
         }
-        var offset = durationMs - positionMs;
-        if (offset < 0) offset = 0;
-        var localOffset = previewPath ? liveLatencyOffsetPreviewMs : liveLatencyOffsetMainMs;
-        if (localOffset === 0 && offset > 0 && liveOffsetMs > offset + 3000) {
-            localOffset = liveOffsetMs - offset;
-            if (previewPath) liveLatencyOffsetPreviewMs = localOffset;
-            else liveLatencyOffsetMainMs = localOffset;
+        if (offsetMs !== null && isFinite(offsetMs) && offsetMs >= 0 && offsetMs <= 2147483647) {
+            sample.valueMs = Math.floor(offsetMs);
+            sample.method = method;
+        } else {
+            // Missing metadata is not a fresh measurement of zero latency.
+            sample.method = sample.valueMs === null ? 'unavailable' : 'last_known';
         }
-        liveOffsetMs -= localOffset;
-        if (liveOffsetMs < 0) {
-            if (previewPath) liveLatencyOffsetPreviewMs = 0;
-            else liveLatencyOffsetMainMs = 0;
-            liveOffsetMs = 0;
-        }
-        return smoothLiveOffsetMs(liveOffsetMs, !!previewPath);
+        return sample.valueMs === null ? 0 : sample.valueMs;
     }
     function smoothLiveOffsetMs(rawMs, previewPath) {
         var next = parseInt(rawMs, 10);
@@ -1793,7 +1837,7 @@
         if (video === mv && durationMs > 0) mainDurationMsCached = durationMs;
         var bufferSeconds = getBufferedAheadSeconds(video);
         var bufferMs = Math.round(bufferSeconds * 1000);
-        var liveOffsetMs = showLatency ? getCurrentLiveOffsetMs(video, durationMs, positionMs, !!usePreviewList) : 0;
+        var liveOffsetMs = showLatency ? smoothLiveOffsetMs(getCurrentLiveOffsetMs(video), !!usePreviewList) : 0;
         updateStatusCounters(video, !!usePreviewList);
         var payload = [
             getAndroidCounterText(statusConSpeed, statusConSpeedAVG, statusSpeedCounter),
@@ -1828,8 +1872,6 @@
         statusLastBufferedEndSeconds = 0;
         statusLiveOffsetMainDisplayMs = 0;
         statusLiveOffsetPreviewDisplayMs = 0;
-        liveLatencyOffsetMainMs = 0;
-        liveLatencyOffsetPreviewMs = 0;
     }
     // =========================================================================
     // Seek, Audio, Quality, and Playback Control
@@ -2264,7 +2306,6 @@
         ms.qp = -1;
         ms.resume = 0;
         mainDurationMsCached = 0;
-        liveLatencyOffsetMainMs = 0;
     }
     function resetPreviewState() {
         ps.type = 1;
@@ -2278,7 +2319,6 @@
         ps.multi = 1;
         ps.resume = 0;
         previewDurationMsCached = 0;
-        liveLatencyOffsetPreviewMs = 0;
     }
     // =========================================================================
     // Core Playback Entry Points
@@ -4589,9 +4629,12 @@
             var chatNumber = parseInt(n, 10);
             if (!isFinite(chatNumber) || chatNumber < 0) chatNumber = 0;
             var video = chatNumber === 1 && pv ? pv : mv;
-            var duration = video === pv ? getPreviewDurationMs() : getMainDurationMs();
-            var position = video === pv ? getPreviewCurrentTimeMs() : getMainCurrentTimeMs();
-            var liveOffset = getCurrentLiveOffsetMs(video, duration, position, video === pv);
+            var liveOffset = getCurrentLiveOffsetMs(video);
+            bridgeDebugLog('chat_latency_sample', {
+                chatNumber: chatNumber,
+                offsetMs: liveOffset,
+                method: video && video.__sttvLiveOffset ? video.__sttvLiveOffset.method : 'unavailable'
+            });
             call('ChatLive_SetLatency', [chatNumber, liveOffset]);
         };
         // IMPLEMENTED: Applies per-channel enabled flags for audio mixer logic.
